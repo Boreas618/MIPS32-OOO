@@ -4,8 +4,8 @@
 #include <verilated.h>
 #include <verilated_dpi.h>
 
-#include <Vtop.h>
-#include <Vtop__Dpi.h>
+#include <VTop.h>
+#include <VTop__Dpi.h>
 
 #include <stdint.h>
 #include <vector>

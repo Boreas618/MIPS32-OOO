@@ -1,7 +1,13 @@
-hello.bin:
-	mips-linux-gnu-gcc -O0 -c -EL -nostdlib -I../ addu.S
-	/usr/mips-linux-gnu/bin/ld -EL addu.o -static -Ttext=0x1000 -o addu.elf
-	/usr/bin/mips-linux-gnu-objcopy -O binary addu.elf addu.bin
+include ../common.mk
+
+NAME = addu
+
+hello.bin: $(NAME).bin
+
+$(NAME).bin: $(NAME).S
+	$(CC) $(CFLAGS) $(NAME).S -o $(NAME).o
+	$(LD) $(LDFLAGS) $(NAME).o -Ttext=0x1000 -o $(NAME).elf
+	$(OBJCOPY) $(OBJCOPY_FLAGS) $(NAME).elf $(NAME).bin
 
 clean:
-	rm addu.o addu.elf addu.bin
+	rm -f $(NAME).o $(NAME).elf $(NAME).bin

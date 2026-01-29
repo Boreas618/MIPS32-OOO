@@ -1,7 +1,13 @@
-hello.bin:
-	mips-linux-gnu-gcc -O0 -c -EL -nostdlib -I../ load_store.S
-	/usr/mips-linux-gnu/bin/ld -EL load_store.o -static -Ttext=0x1000 -o load_store.elf
-	/usr/bin/mips-linux-gnu-objcopy -O binary load_store.elf load_store.bin
+include ../common.mk
+
+NAME = load_store
+
+hello.bin: $(NAME).bin
+
+$(NAME).bin: $(NAME).S
+	$(CC) $(CFLAGS) $(NAME).S -o $(NAME).o
+	$(LD) $(LDFLAGS) $(NAME).o -Ttext=0x1000 -o $(NAME).elf
+	$(OBJCOPY) $(OBJCOPY_FLAGS) $(NAME).elf $(NAME).bin
 
 clean:
-	rm load_store.o load_store.elf load_store.bin
+	rm -f $(NAME).o $(NAME).elf $(NAME).bin

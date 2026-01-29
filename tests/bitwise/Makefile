@@ -1,7 +1,13 @@
-hello.bin:
-	mips-linux-gnu-gcc -O0 -c -EL -nostdlib -I../ bitwise.S
-	/usr/mips-linux-gnu/bin/ld -EL bitwise.o -static -Ttext=0x1000 -o bitwise.elf
-	/usr/bin/mips-linux-gnu-objcopy -O binary bitwise.elf bitwise.bin
+include ../common.mk
+
+NAME = bitwise
+
+hello.bin: $(NAME).bin
+
+$(NAME).bin: $(NAME).S
+	$(CC) $(CFLAGS) $(NAME).S -o $(NAME).o
+	$(LD) $(LDFLAGS) $(NAME).o -Ttext=0x1000 -o $(NAME).elf
+	$(OBJCOPY) $(OBJCOPY_FLAGS) $(NAME).elf $(NAME).bin
 
 clean:
-	rm bitwise.o bitwise.elf bitwise.bin
+	rm -f $(NAME).o $(NAME).elf $(NAME).bin

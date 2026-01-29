@@ -1,7 +1,13 @@
-hello.bin:
-	mips-linux-gnu-gcc -O0 -c -EL -nostdlib -I../ branch.S
-	/usr/mips-linux-gnu/bin/ld -EL branch.o -static -Ttext=0x1000 -o branch.elf
-	/usr/bin/mips-linux-gnu-objcopy -O binary branch.elf branch.bin
+include ../common.mk
+
+NAME = branch
+
+hello.bin: $(NAME).bin
+
+$(NAME).bin: $(NAME).S
+	$(CC) $(CFLAGS) $(NAME).S -o $(NAME).o
+	$(LD) $(LDFLAGS) $(NAME).o -Ttext=0x1000 -o $(NAME).elf
+	$(OBJCOPY) $(OBJCOPY_FLAGS) $(NAME).elf $(NAME).bin
 
 clean:
-	rm branch.o branch.elf branch.bin
+	rm -f $(NAME).o $(NAME).elf $(NAME).bin

@@ -1,7 +1,13 @@
-hello.bin:
-	mips-linux-gnu-gcc -O0 -c -EL -nostdlib -I../ lui.S
-	/usr/mips-linux-gnu/bin/ld -EL lui.o -static -Ttext=0x1000 -o lui.elf
-	/usr/bin/mips-linux-gnu-objcopy -O binary lui.elf lui.bin
+include ../common.mk
+
+NAME = lui
+
+hello.bin: $(NAME).bin
+
+$(NAME).bin: $(NAME).S
+	$(CC) $(CFLAGS) $(NAME).S -o $(NAME).o
+	$(LD) $(LDFLAGS) $(NAME).o -Ttext=0x1000 -o $(NAME).elf
+	$(OBJCOPY) $(OBJCOPY_FLAGS) $(NAME).elf $(NAME).bin
 
 clean:
-	rm lui.o lui.elf lui.bin
+	rm -f $(NAME).o $(NAME).elf $(NAME).bin

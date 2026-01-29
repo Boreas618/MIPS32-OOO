@@ -1,4 +1,5 @@
 /* verilator lint_off UNUSEDSIGNAL */
+/* verilator lint_off IMPLICITSTATIC */
 module DataMemory(
     input   logic   reset,
     input   logic   clk,
