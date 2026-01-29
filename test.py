@@ -48,7 +48,12 @@ if __name__ == "__main__":
         ("./tests/quick_sort/quick_sort.bin", 'QSORT'),
         ("./tests/ooo_deps/ooo_deps.bin", 'OOO_DEPS'),
         ("./tests/ooo_mem/ooo_mem.bin", 'OOO_MEM'),
-        ("./tests/ooo_branch/ooo_branch.bin", 'OOO_BRANCH')
+        ("./tests/ooo_branch/ooo_branch.bin", 'OOO_BRANCH'),
+        ("./tests/matrix_mult/matrix_mult.bin", 'MATRIX_MULT'),
+        ("./tests/prime_sieve/prime_sieve.bin", 'PRIME_SIEVE'),
+        ("./tests/fib_memo/fib_memo.bin", 'FIB_MEMO'),
+        ("./tests/binary_search/binary_search.bin", 'BINARY_SEARCH'),
+        ("./tests/linked_list/linked_list.bin", 'LINKED_LIST')
     ]
     good = True
     all_stats = []

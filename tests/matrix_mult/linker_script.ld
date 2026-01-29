@@ -11,7 +11,7 @@ SECTIONS
   . = ALIGN(4);        /* Align to 4-byte boundary */
   .bss : { *(.bss) *(COMMON) } /* All .bss sections and COMMON symbols */
 
-  /* Set the stack to start at address 0x8000 */
-  . = 0x8000;
+  /* Set the stack to start at address 0x10000 for larger stack */
+  . = 0x10000;
   PROVIDE(_stack = .);
 }

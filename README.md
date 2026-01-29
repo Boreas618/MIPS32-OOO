@@ -96,11 +96,21 @@ Expected output:
 [OK]    TEST9-OOO_DEPS
 [OK]    TEST10-OOO_MEM
 [OK]    TEST11-OOO_BRANCH
+[OK]    TEST12-MATRIX_MULT
+[OK]    TEST13-PRIME_SIEVE
+[OK]    TEST14-FIB_MEMO
+[OK]    TEST15-BINARY_SEARCH
+[OK]    TEST16-LINKED_LIST
 
 ACCEPTED.
 ```
 
-The test harness also reports branch prediction statistics for each test.
+The test suite includes:
+- **Unit tests** (1-7): Basic instruction verification
+- **Algorithm tests** (8, 12-16): Complex workloads including quicksort, matrix multiplication, prime sieve, Fibonacci, binary search, and linked list operations
+- **OoO-specific tests** (9-11): Dependency chains, memory disambiguation, and branch prediction
+
+The test harness reports branch prediction statistics and cycle counts for each test.
 
 ### Debug Mode
 
