@@ -77,15 +77,23 @@ module Memory(
         end
     end
 
-    DataMemory data_memory(
-        .reset(rst),
+    /* Cache statistics (optional debug signals) */
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic [31:0] dcache_hit_count;
+    logic [31:0] dcache_miss_count;
+    /* verilator lint_on UNUSEDSIGNAL */
+
+    L1DCache data_cache(
         .clk(clk),
-        .write_enabled(mem_write_m),
+        .rst(rst),
         .valid(mem_access_m),
         .addr(alu_out_m),
+        .write_enabled(mem_write_m),
         .w_data(write_data_m),
         .r_data(read_data_m),
-        .status(dmem_status)
+        .status(dmem_status),
+        .hit_count(dcache_hit_count),
+        .miss_count(dcache_miss_count)
     );
 
 endmodule

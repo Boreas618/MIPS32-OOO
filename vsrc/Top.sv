@@ -107,13 +107,21 @@ module Top (
         end
     end
 
-    InstMemory inst_mem (
-        .rst(rst),
+    /* Cache statistics (optional debug signals) */
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic [31:0] icache_hit_count;
+    logic [31:0] icache_miss_count;
+    /* verilator lint_on UNUSEDSIGNAL */
+
+    L1ICache inst_cache (
         .clk(clk),
+        .rst(rst),
         .stall(dmem_stall || branch_stall),
         .addr(pc),
         .r_data(inst),
-        .r_data_status(imem_status)
+        .r_data_status(imem_status),
+        .hit_count(icache_hit_count),
+        .miss_count(icache_miss_count)
     );
 
     /*

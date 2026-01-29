@@ -10,8 +10,13 @@ VSRCS = $(shell find $(ROOT)/vsrc -name "*.v" -o -name "*.sv")
 TOPNAME = Top
 VERILATOR_FLAGS = -Wall --cc --exe --build --trace -O2 -Ivsrc
 CFLAGS += -std=c++17 -I$(ROOT)/csrc -I$(ROOT)/csrc/include
-CFLAGS += -I$(shell llvm-config --includedir)
+
+# Check if LLVM is available
+LLVM_CONFIG := $(shell which llvm-config 2>/dev/null)
+ifneq ($(LLVM_CONFIG),)
+CFLAGS += -DHAS_LLVM -I$(shell llvm-config --includedir)
 LDFLAGS += $(shell llvm-config --ldflags --libs)
+endif
 
 BUILD_DIR = $(ROOT)/build
 OBJ_DIR = $(BUILD_DIR)/obj_dir
