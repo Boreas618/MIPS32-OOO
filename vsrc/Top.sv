@@ -812,6 +812,536 @@ module Top (
     assign prf_clear_ready_addr = '{default: 6'b0};
     assign prf_clear_ready = '0;
 
+    /*
+     * ========================================================================
+     * Out-of-Order Backend (Milestone 4)
+     * ========================================================================
+     * 
+     * The following modules implement the OoO backend pipeline:
+     * - ReservationStation: Dynamic scheduling with wake-up logic
+     * - IssueUnit: Instruction selection and dispatch to FUs
+     * - IntegerUnits: ALU, multiplier, divider
+     * - BranchExecute: OoO branch resolution
+     * - CDB: Result broadcast network
+     * - BypassNetwork: Operand forwarding
+     *
+     * These components are instantiated and ready for integration.
+     * When OOO_ENABLED=1 and M5 (ROB) is implemented, these will be
+     * connected to the main pipeline.
+     */
+
+    // ========== Reservation Station ==========
+    localparam RS_ENTRIES = 16;
+    localparam RS_ISSUE_WIDTH = 2;
+    localparam CDB_WIDTH = 4;
+    localparam NUM_ALU = 2;
+    localparam NUM_MEM = 1;
+    localparam NUM_BRANCH = 1;
+
+    // RS dispatch interface (from RenameUnit)
+    logic [FETCH_WIDTH-1:0] rs_dispatch_valid;
+    logic [5:0] rs_dispatch_prs1 [FETCH_WIDTH-1:0];
+    logic [5:0] rs_dispatch_prs2 [FETCH_WIDTH-1:0];
+    logic [5:0] rs_dispatch_prd [FETCH_WIDTH-1:0];
+    logic [31:0] rs_dispatch_prs1_value [FETCH_WIDTH-1:0];
+    logic [31:0] rs_dispatch_prs2_value [FETCH_WIDTH-1:0];
+    logic [FETCH_WIDTH-1:0] rs_dispatch_prs1_ready;
+    logic [FETCH_WIDTH-1:0] rs_dispatch_prs2_ready;
+    logic [3:0] rs_dispatch_alu_control [FETCH_WIDTH-1:0];
+    logic [1:0] rs_dispatch_alu_src [FETCH_WIDTH-1:0];
+    logic [31:0] rs_dispatch_imm [FETCH_WIDTH-1:0];
+    logic [4:0] rs_dispatch_shamt [FETCH_WIDTH-1:0];
+    logic [FETCH_WIDTH-1:0] rs_dispatch_reg_write;
+    logic [FETCH_WIDTH-1:0] rs_dispatch_mem_to_reg;
+    logic [FETCH_WIDTH-1:0] rs_dispatch_mem_write;
+    logic [FETCH_WIDTH-1:0] rs_dispatch_mem_read;
+    logic [FETCH_WIDTH-1:0] rs_dispatch_branch;
+    logic [31:0] rs_dispatch_pc [FETCH_WIDTH-1:0];
+    logic [31:0] rs_dispatch_pc_plus_4 [FETCH_WIDTH-1:0];
+    logic [31:0] rs_dispatch_branch_target [FETCH_WIDTH-1:0];
+    logic [31:0] rs_dispatch_jump_target [FETCH_WIDTH-1:0];
+    logic [3:0] rs_dispatch_branch_type [FETCH_WIDTH-1:0];
+    logic [31:0] rs_dispatch_predicted_target [FETCH_WIDTH-1:0];
+    logic [FETCH_WIDTH-1:0] rs_dispatch_predicted_taken;
+    logic [6:0] rs_dispatch_rob_idx [FETCH_WIDTH-1:0];
+
+    // RS issue interface (to IssueUnit)
+    logic [RS_ISSUE_WIDTH-1:0] rs_issue_valid;
+    logic [5:0] rs_issue_prd [RS_ISSUE_WIDTH-1:0];
+    logic [31:0] rs_issue_src1 [RS_ISSUE_WIDTH-1:0];
+    logic [31:0] rs_issue_src2 [RS_ISSUE_WIDTH-1:0];
+    logic [3:0] rs_issue_alu_control [RS_ISSUE_WIDTH-1:0];
+    logic [1:0] rs_issue_alu_src [RS_ISSUE_WIDTH-1:0];
+    logic [31:0] rs_issue_imm [RS_ISSUE_WIDTH-1:0];
+    logic [4:0] rs_issue_shamt [RS_ISSUE_WIDTH-1:0];
+    logic [RS_ISSUE_WIDTH-1:0] rs_issue_reg_write;
+    logic [RS_ISSUE_WIDTH-1:0] rs_issue_mem_to_reg;
+    logic [RS_ISSUE_WIDTH-1:0] rs_issue_mem_write;
+    logic [RS_ISSUE_WIDTH-1:0] rs_issue_mem_read;
+    logic [RS_ISSUE_WIDTH-1:0] rs_issue_branch;
+    logic [31:0] rs_issue_pc [RS_ISSUE_WIDTH-1:0];
+    logic [31:0] rs_issue_pc_plus_4 [RS_ISSUE_WIDTH-1:0];
+    logic [31:0] rs_issue_branch_target [RS_ISSUE_WIDTH-1:0];
+    logic [31:0] rs_issue_jump_target [RS_ISSUE_WIDTH-1:0];
+    logic [3:0] rs_issue_branch_type [RS_ISSUE_WIDTH-1:0];
+    logic [31:0] rs_issue_predicted_target [RS_ISSUE_WIDTH-1:0];
+    logic [RS_ISSUE_WIDTH-1:0] rs_issue_predicted_taken;
+    logic [6:0] rs_issue_rob_idx [RS_ISSUE_WIDTH-1:0];
+    logic [$clog2(RS_ENTRIES)-1:0] rs_issue_idx [RS_ISSUE_WIDTH-1:0];
+    logic [RS_ISSUE_WIDTH-1:0] rs_issue_ack;
+    logic [$clog2(RS_ENTRIES):0] rs_free_count;
+    logic rs_full, rs_empty;
+
+    // CDB signals
+    logic [CDB_WIDTH-1:0] cdb_valid;
+    logic [5:0] cdb_tag [CDB_WIDTH-1:0];
+    logic [31:0] cdb_data [CDB_WIDTH-1:0];
+    logic [6:0] cdb_rob_idx [CDB_WIDTH-1:0];
+
+    // RS flush
+    logic rs_flush;
+    assign rs_flush = flush_pipeline;
+
+    ReservationStation #(
+        .NUM_ENTRIES(RS_ENTRIES),
+        .NUM_PHYS_REGS(NUM_PHYS_REGS),
+        .DISPATCH_WIDTH(FETCH_WIDTH),
+        .ISSUE_WIDTH(RS_ISSUE_WIDTH),
+        .CDB_WIDTH(CDB_WIDTH)
+    ) reservation_station (
+        .clk(clk),
+        .rst(rst),
+        .dispatch_valid(rs_dispatch_valid),
+        .dispatch_prs1(rs_dispatch_prs1),
+        .dispatch_prs2(rs_dispatch_prs2),
+        .dispatch_prd(rs_dispatch_prd),
+        .dispatch_prs1_value(rs_dispatch_prs1_value),
+        .dispatch_prs2_value(rs_dispatch_prs2_value),
+        .dispatch_prs1_ready(rs_dispatch_prs1_ready),
+        .dispatch_prs2_ready(rs_dispatch_prs2_ready),
+        .dispatch_alu_control(rs_dispatch_alu_control),
+        .dispatch_alu_src(rs_dispatch_alu_src),
+        .dispatch_imm(rs_dispatch_imm),
+        .dispatch_shamt(rs_dispatch_shamt),
+        .dispatch_reg_write(rs_dispatch_reg_write),
+        .dispatch_mem_to_reg(rs_dispatch_mem_to_reg),
+        .dispatch_mem_write(rs_dispatch_mem_write),
+        .dispatch_mem_read(rs_dispatch_mem_read),
+        .dispatch_branch(rs_dispatch_branch),
+        .dispatch_pc(rs_dispatch_pc),
+        .dispatch_pc_plus_4(rs_dispatch_pc_plus_4),
+        .dispatch_branch_target(rs_dispatch_branch_target),
+        .dispatch_jump_target(rs_dispatch_jump_target),
+        .dispatch_branch_type(rs_dispatch_branch_type),
+        .dispatch_predicted_target(rs_dispatch_predicted_target),
+        .dispatch_predicted_taken(rs_dispatch_predicted_taken),
+        .dispatch_rob_idx(rs_dispatch_rob_idx),
+        .cdb_valid(cdb_valid),
+        .cdb_tag(cdb_tag),
+        .cdb_data(cdb_data),
+        .issue_valid(rs_issue_valid),
+        .issue_prd(rs_issue_prd),
+        .issue_src1(rs_issue_src1),
+        .issue_src2(rs_issue_src2),
+        .issue_alu_control(rs_issue_alu_control),
+        .issue_alu_src(rs_issue_alu_src),
+        .issue_imm(rs_issue_imm),
+        .issue_shamt(rs_issue_shamt),
+        .issue_reg_write(rs_issue_reg_write),
+        .issue_mem_to_reg(rs_issue_mem_to_reg),
+        .issue_mem_write(rs_issue_mem_write),
+        .issue_mem_read(rs_issue_mem_read),
+        .issue_branch(rs_issue_branch),
+        .issue_pc(rs_issue_pc),
+        .issue_pc_plus_4(rs_issue_pc_plus_4),
+        .issue_branch_target(rs_issue_branch_target),
+        .issue_jump_target(rs_issue_jump_target),
+        .issue_branch_type(rs_issue_branch_type),
+        .issue_predicted_target(rs_issue_predicted_target),
+        .issue_predicted_taken(rs_issue_predicted_taken),
+        .issue_rob_idx(rs_issue_rob_idx),
+        .issue_rs_idx(rs_issue_idx),
+        .issue_ack(rs_issue_ack),
+        .flush(rs_flush),
+        .free_count(rs_free_count),
+        .full(rs_full),
+        .empty(rs_empty)
+    );
+
+    // ========== Issue Unit ==========
+    // IssueUnit outputs to functional units
+    logic [NUM_ALU-1:0] iu_alu_valid;
+    logic [5:0] iu_alu_prd [NUM_ALU-1:0];
+    logic [31:0] iu_alu_src1 [NUM_ALU-1:0];
+    logic [31:0] iu_alu_src2 [NUM_ALU-1:0];
+    logic [3:0] iu_alu_control [NUM_ALU-1:0];
+    logic [1:0] iu_alu_src_sel [NUM_ALU-1:0];
+    logic [31:0] iu_alu_imm [NUM_ALU-1:0];
+    logic [4:0] iu_alu_shamt [NUM_ALU-1:0];
+    logic [NUM_ALU-1:0] iu_alu_reg_write;
+    logic [31:0] iu_alu_pc [NUM_ALU-1:0];
+    logic [31:0] iu_alu_pc_plus_4 [NUM_ALU-1:0];
+    logic [6:0] iu_alu_rob_idx [NUM_ALU-1:0];
+
+    logic [NUM_MEM-1:0] iu_mem_valid;
+    logic [5:0] iu_mem_prd [NUM_MEM-1:0];
+    logic [31:0] iu_mem_addr [NUM_MEM-1:0];
+    logic [31:0] iu_mem_data [NUM_MEM-1:0];
+    logic [NUM_MEM-1:0] iu_mem_write;
+    logic [NUM_MEM-1:0] iu_mem_read;
+    logic [6:0] iu_mem_rob_idx [NUM_MEM-1:0];
+
+    logic [NUM_BRANCH-1:0] iu_branch_valid;
+    logic [31:0] iu_branch_src1 [NUM_BRANCH-1:0];
+    logic [31:0] iu_branch_src2 [NUM_BRANCH-1:0];
+    logic [31:0] iu_branch_pc [NUM_BRANCH-1:0];
+    logic [31:0] iu_branch_target [NUM_BRANCH-1:0];
+    logic [31:0] iu_branch_jump_target [NUM_BRANCH-1:0];
+    logic [3:0] iu_branch_type [NUM_BRANCH-1:0];
+    logic [31:0] iu_branch_predicted_target [NUM_BRANCH-1:0];
+    logic [NUM_BRANCH-1:0] iu_branch_predicted_taken;
+    logic [6:0] iu_branch_rob_idx [NUM_BRANCH-1:0];
+
+    // FU availability
+    logic [NUM_ALU-1:0] fu_alu_available;
+    logic [NUM_MEM-1:0] fu_mem_available;
+    logic [NUM_BRANCH-1:0] fu_branch_available;
+
+    IssueUnit #(
+        .NUM_PHYS_REGS(NUM_PHYS_REGS),
+        .RS_ENTRIES(RS_ENTRIES),
+        .ISSUE_WIDTH(RS_ISSUE_WIDTH),
+        .NUM_ALU(NUM_ALU),
+        .NUM_MEM(NUM_MEM),
+        .NUM_BRANCH(NUM_BRANCH)
+    ) issue_unit (
+        .clk(clk),
+        .rst(rst),
+        .int_rs_valid(rs_issue_valid),
+        .int_rs_prd(rs_issue_prd),
+        .int_rs_src1(rs_issue_src1),
+        .int_rs_src2(rs_issue_src2),
+        .int_rs_alu_control(rs_issue_alu_control),
+        .int_rs_alu_src(rs_issue_alu_src),
+        .int_rs_imm(rs_issue_imm),
+        .int_rs_shamt(rs_issue_shamt),
+        .int_rs_reg_write(rs_issue_reg_write),
+        .int_rs_mem_to_reg(rs_issue_mem_to_reg),
+        .int_rs_mem_write(rs_issue_mem_write),
+        .int_rs_mem_read(rs_issue_mem_read),
+        .int_rs_branch(rs_issue_branch),
+        .int_rs_pc(rs_issue_pc),
+        .int_rs_pc_plus_4(rs_issue_pc_plus_4),
+        .int_rs_branch_target(rs_issue_branch_target),
+        .int_rs_jump_target(rs_issue_jump_target),
+        .int_rs_branch_type(rs_issue_branch_type),
+        .int_rs_predicted_target(rs_issue_predicted_target),
+        .int_rs_predicted_taken(rs_issue_predicted_taken),
+        .int_rs_rob_idx(rs_issue_rob_idx),
+        .int_rs_idx(rs_issue_idx),
+        .int_rs_ack(rs_issue_ack),
+        .alu_available(fu_alu_available),
+        .mem_available(fu_mem_available),
+        .branch_available(fu_branch_available),
+        .alu_issue_valid(iu_alu_valid),
+        .alu_issue_prd(iu_alu_prd),
+        .alu_issue_src1(iu_alu_src1),
+        .alu_issue_src2(iu_alu_src2),
+        .alu_issue_alu_control(iu_alu_control),
+        .alu_issue_alu_src(iu_alu_src_sel),
+        .alu_issue_imm(iu_alu_imm),
+        .alu_issue_shamt(iu_alu_shamt),
+        .alu_issue_reg_write(iu_alu_reg_write),
+        .alu_issue_pc(iu_alu_pc),
+        .alu_issue_pc_plus_4(iu_alu_pc_plus_4),
+        .alu_issue_rob_idx(iu_alu_rob_idx),
+        .mem_issue_valid(iu_mem_valid),
+        .mem_issue_prd(iu_mem_prd),
+        .mem_issue_addr(iu_mem_addr),
+        .mem_issue_data(iu_mem_data),
+        .mem_issue_mem_write(iu_mem_write),
+        .mem_issue_mem_read(iu_mem_read),
+        .mem_issue_rob_idx(iu_mem_rob_idx),
+        .branch_issue_valid(iu_branch_valid),
+        .branch_issue_src1(iu_branch_src1),
+        .branch_issue_src2(iu_branch_src2),
+        .branch_issue_pc(iu_branch_pc),
+        .branch_issue_branch_target(iu_branch_target),
+        .branch_issue_jump_target(iu_branch_jump_target),
+        .branch_issue_branch_type(iu_branch_type),
+        .branch_issue_predicted_target(iu_branch_predicted_target),
+        .branch_issue_predicted_taken(iu_branch_predicted_taken),
+        .branch_issue_rob_idx(iu_branch_rob_idx),
+        .flush(rs_flush)
+    );
+
+    // ========== Integer Units ==========
+    logic [NUM_ALU-1:0] int_alu_result_valid;
+    logic [5:0] int_alu_result_prd [NUM_ALU-1:0];
+    logic [31:0] int_alu_result_data [NUM_ALU-1:0];
+    logic [6:0] int_alu_result_rob_idx [NUM_ALU-1:0];
+
+    // Multiplier (tied off for now - no MUL instructions in test set)
+    logic mul_valid_tie;
+    logic [5:0] mul_prd_tie;
+    logic [31:0] mul_src1_tie, mul_src2_tie;
+    logic mul_signed_tie;
+    logic [6:0] mul_rob_idx_tie;
+    logic mul_available;
+    logic mul_result_valid;
+    logic [5:0] mul_result_prd;
+    logic [31:0] mul_result_data;
+    logic [6:0] mul_result_rob_idx;
+
+    // Divider (tied off for now - no DIV instructions in test set)
+    logic div_valid_tie;
+    logic [5:0] div_prd_tie;
+    logic [31:0] div_src1_tie, div_src2_tie;
+    logic div_signed_tie, div_remainder_tie;
+    logic [6:0] div_rob_idx_tie;
+    logic div_available;
+    logic div_result_valid;
+    logic [5:0] div_result_prd;
+    logic [31:0] div_result_data;
+    logic [6:0] div_result_rob_idx;
+
+    assign mul_valid_tie = 1'b0;
+    assign mul_prd_tie = '0;
+    assign mul_src1_tie = '0;
+    assign mul_src2_tie = '0;
+    assign mul_signed_tie = 1'b0;
+    assign mul_rob_idx_tie = '0;
+    assign div_valid_tie = 1'b0;
+    assign div_prd_tie = '0;
+    assign div_src1_tie = '0;
+    assign div_src2_tie = '0;
+    assign div_signed_tie = 1'b0;
+    assign div_remainder_tie = 1'b0;
+    assign div_rob_idx_tie = '0;
+
+    IntegerUnits #(
+        .NUM_PHYS_REGS(NUM_PHYS_REGS),
+        .NUM_ALU(NUM_ALU),
+        .CDB_WIDTH(CDB_WIDTH)
+    ) integer_units (
+        .clk(clk),
+        .rst(rst),
+        .alu_valid(iu_alu_valid),
+        .alu_prd(iu_alu_prd),
+        .alu_src1(iu_alu_src1),
+        .alu_src2(iu_alu_src2),
+        .alu_control(iu_alu_control),
+        .alu_src_sel(iu_alu_src_sel),
+        .alu_imm(iu_alu_imm),
+        .alu_shamt(iu_alu_shamt),
+        .alu_reg_write(iu_alu_reg_write),
+        .alu_pc(iu_alu_pc),
+        .alu_pc_plus_4(iu_alu_pc_plus_4),
+        .alu_rob_idx(iu_alu_rob_idx),
+        .alu_available(fu_alu_available),
+        .alu_result_valid(int_alu_result_valid),
+        .alu_result_prd(int_alu_result_prd),
+        .alu_result_data(int_alu_result_data),
+        .alu_result_rob_idx(int_alu_result_rob_idx),
+        .mul_valid(mul_valid_tie),
+        .mul_prd(mul_prd_tie),
+        .mul_src1(mul_src1_tie),
+        .mul_src2(mul_src2_tie),
+        .mul_signed_op(mul_signed_tie),
+        .mul_rob_idx(mul_rob_idx_tie),
+        .mul_available(mul_available),
+        .mul_result_valid(mul_result_valid),
+        .mul_result_prd(mul_result_prd),
+        .mul_result_data(mul_result_data),
+        .mul_result_rob_idx(mul_result_rob_idx),
+        .div_valid(div_valid_tie),
+        .div_prd(div_prd_tie),
+        .div_src1(div_src1_tie),
+        .div_src2(div_src2_tie),
+        .div_signed_op(div_signed_tie),
+        .div_remainder(div_remainder_tie),
+        .div_rob_idx(div_rob_idx_tie),
+        .div_available(div_available),
+        .div_result_valid(div_result_valid),
+        .div_result_prd(div_result_prd),
+        .div_result_data(div_result_data),
+        .div_result_rob_idx(div_result_rob_idx),
+        .flush(rs_flush)
+    );
+
+    // ========== Branch Execute Unit ==========
+    logic [NUM_BRANCH-1:0] be_result_valid;
+    logic [NUM_BRANCH-1:0] be_actual_taken;
+    logic [31:0] be_actual_target [NUM_BRANCH-1:0];
+    logic [NUM_BRANCH-1:0] be_mispredicted;
+    logic [31:0] be_correct_pc [NUM_BRANCH-1:0];
+    logic [6:0] be_result_rob_idx [NUM_BRANCH-1:0];
+
+    BranchExecute #(
+        .NUM_PHYS_REGS(NUM_PHYS_REGS),
+        .NUM_BRANCH(NUM_BRANCH)
+    ) branch_execute (
+        .clk(clk),
+        .rst(rst),
+        .branch_valid(iu_branch_valid),
+        .branch_src1(iu_branch_src1),
+        .branch_src2(iu_branch_src2),
+        .branch_pc(iu_branch_pc),
+        .branch_target(iu_branch_target),
+        .jump_target(iu_branch_jump_target),
+        .branch_type(iu_branch_type),
+        .predicted_target(iu_branch_predicted_target),
+        .predicted_taken(iu_branch_predicted_taken),
+        .branch_rob_idx(iu_branch_rob_idx),
+        .branch_available(fu_branch_available),
+        .branch_result_valid(be_result_valid),
+        .branch_actual_taken(be_actual_taken),
+        .branch_actual_target(be_actual_target),
+        .branch_mispredicted(be_mispredicted),
+        .branch_correct_pc(be_correct_pc),
+        .branch_result_rob_idx(be_result_rob_idx),
+        .flush(rs_flush)
+    );
+
+    // ========== Common Data Bus ==========
+    // Memory results (tied off until M5 LSQ)
+    logic [NUM_MEM-1:0] mem_result_valid_tie;
+    logic [5:0] mem_result_prd_tie [NUM_MEM-1:0];
+    logic [31:0] mem_result_data_tie [NUM_MEM-1:0];
+    logic [6:0] mem_result_rob_idx_tie [NUM_MEM-1:0];
+    logic [NUM_MEM-1:0] mem_result_ack;
+    
+    assign mem_result_valid_tie = '0;
+    assign mem_result_prd_tie = '{default: 6'b0};
+    assign mem_result_data_tie = '{default: 32'b0};
+    assign mem_result_rob_idx_tie = '{default: 7'b0};
+
+    // CDB acknowledgments
+    logic [NUM_ALU-1:0] cdb_alu_ack;
+    logic cdb_mul_ack;
+    logic cdb_div_ack;
+    logic [NUM_BRANCH-1:0] cdb_branch_ack;
+
+    // Branch completion signals from CDB
+    logic [NUM_BRANCH-1:0] cdb_branch_complete;
+    logic [NUM_BRANCH-1:0] cdb_branch_mispredicted;
+    logic [31:0] cdb_branch_correct_pc [NUM_BRANCH-1:0];
+    logic [6:0] cdb_branch_rob_idx [NUM_BRANCH-1:0];
+
+    // Memory availability (tied off until M5)
+    assign fu_mem_available = {NUM_MEM{1'b1}};
+
+    CDB #(
+        .NUM_PHYS_REGS(NUM_PHYS_REGS),
+        .CDB_WIDTH(CDB_WIDTH),
+        .NUM_ALU(NUM_ALU),
+        .NUM_MEM(NUM_MEM),
+        .NUM_BRANCH(NUM_BRANCH)
+    ) cdb_unit (
+        .clk(clk),
+        .rst(rst),
+        .alu_result_valid(int_alu_result_valid),
+        .alu_result_prd(int_alu_result_prd),
+        .alu_result_data(int_alu_result_data),
+        .alu_result_rob_idx(int_alu_result_rob_idx),
+        .alu_result_ack(cdb_alu_ack),
+        .mul_result_valid(mul_result_valid),
+        .mul_result_prd(mul_result_prd),
+        .mul_result_data(mul_result_data),
+        .mul_result_rob_idx(mul_result_rob_idx),
+        .mul_result_ack(cdb_mul_ack),
+        .div_result_valid(div_result_valid),
+        .div_result_prd(div_result_prd),
+        .div_result_data(div_result_data),
+        .div_result_rob_idx(div_result_rob_idx),
+        .div_result_ack(cdb_div_ack),
+        .mem_result_valid(mem_result_valid_tie),
+        .mem_result_prd(mem_result_prd_tie),
+        .mem_result_data(mem_result_data_tie),
+        .mem_result_rob_idx(mem_result_rob_idx_tie),
+        .mem_result_ack(mem_result_ack),
+        .branch_result_valid(be_result_valid),
+        .branch_mispredicted(be_mispredicted),
+        .branch_correct_pc(be_correct_pc),
+        .branch_result_rob_idx(be_result_rob_idx),
+        .branch_result_ack(cdb_branch_ack),
+        .cdb_valid(cdb_valid),
+        .cdb_tag(cdb_tag),
+        .cdb_data(cdb_data),
+        .cdb_rob_idx(cdb_rob_idx),
+        .cdb_branch_complete(cdb_branch_complete),
+        .cdb_branch_mispredicted(cdb_branch_mispredicted),
+        .cdb_branch_correct_pc(cdb_branch_correct_pc),
+        .cdb_branch_rob_idx(cdb_branch_rob_idx),
+        .flush(rs_flush)
+    );
+
+    // ========== Bypass Network ==========
+    localparam BYPASS_PORTS = 8;
+    
+    logic [5:0] bypass_req_tag [BYPASS_PORTS-1:0];
+    logic [BYPASS_PORTS-1:0] bypass_req_valid;
+    logic [31:0] bypass_prf_data [BYPASS_PORTS-1:0];
+    logic [BYPASS_PORTS-1:0] bypass_prf_ready;
+    logic [31:0] bypass_fwd_data [BYPASS_PORTS-1:0];
+    logic [BYPASS_PORTS-1:0] bypass_fwd_valid;
+
+    // Bypass network for same-cycle forwarding (tied off until OoO enabled)
+    assign bypass_req_tag = '{default: 6'b0};
+    assign bypass_req_valid = '0;
+    assign bypass_prf_data = '{default: 32'b0};
+    assign bypass_prf_ready = '0;
+
+    BypassNetwork #(
+        .NUM_PHYS_REGS(NUM_PHYS_REGS),
+        .CDB_WIDTH(CDB_WIDTH),
+        .NUM_ALU(NUM_ALU),
+        .FORWARD_PORTS(BYPASS_PORTS)
+    ) bypass_network (
+        .clk(clk),
+        .rst(rst),
+        .req_tag(bypass_req_tag),
+        .req_valid(bypass_req_valid),
+        .cdb_valid(cdb_valid),
+        .cdb_tag(cdb_tag),
+        .cdb_data(cdb_data),
+        .alu_valid(int_alu_result_valid),
+        .alu_prd(int_alu_result_prd),
+        .alu_data(int_alu_result_data),
+        .prf_read_data(bypass_prf_data),
+        .prf_read_ready(bypass_prf_ready),
+        .fwd_data(bypass_fwd_data),
+        .fwd_valid(bypass_fwd_valid)
+    );
+
+    // M4 Backend control signals (active when OOO_ENABLED=1 and M5 ROB is implemented)
+    // Currently tied off since OOO backend is not yet fully integrated
+    assign rs_dispatch_valid = '0;
+    assign rs_dispatch_prs1 = '{default: 6'b0};
+    assign rs_dispatch_prs2 = '{default: 6'b0};
+    assign rs_dispatch_prd = '{default: 6'b0};
+    assign rs_dispatch_prs1_value = '{default: 32'b0};
+    assign rs_dispatch_prs2_value = '{default: 32'b0};
+    assign rs_dispatch_prs1_ready = '0;
+    assign rs_dispatch_prs2_ready = '0;
+    assign rs_dispatch_alu_control = '{default: 4'b0};
+    assign rs_dispatch_alu_src = '{default: 2'b0};
+    assign rs_dispatch_imm = '{default: 32'b0};
+    assign rs_dispatch_shamt = '{default: 5'b0};
+    assign rs_dispatch_reg_write = '0;
+    assign rs_dispatch_mem_to_reg = '0;
+    assign rs_dispatch_mem_write = '0;
+    assign rs_dispatch_mem_read = '0;
+    assign rs_dispatch_branch = '0;
+    assign rs_dispatch_pc = '{default: 32'b0};
+    assign rs_dispatch_pc_plus_4 = '{default: 32'b0};
+    assign rs_dispatch_branch_target = '{default: 32'b0};
+    assign rs_dispatch_jump_target = '{default: 32'b0};
+    assign rs_dispatch_branch_type = '{default: 4'b0};
+    assign rs_dispatch_predicted_target = '{default: 32'b0};
+    assign rs_dispatch_predicted_taken = '0;
+    assign rs_dispatch_rob_idx = '{default: 7'b0};
+
     /* verilator lint_on UNUSEDSIGNAL */
 
 endmodule
