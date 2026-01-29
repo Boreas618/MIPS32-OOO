@@ -26,6 +26,9 @@ static inline void update_cpu()
 	cpu.last_pc = vcpu->last_pc;
 	cpu.last_inst = vcpu->last_inst;
 	cpu.err = vcpu->err;
+	// Branch prediction statistics
+	cpu.bp_total_branches = vcpu->bp_total_branches_out;
+	cpu.bp_mispredictions = vcpu->bp_mispredictions_out;
 }
 
 static inline void single_cycle()

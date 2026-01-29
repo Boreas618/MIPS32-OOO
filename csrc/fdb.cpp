@@ -115,6 +115,19 @@ static void fdb_debug_once(void)
 	}
 }
 
+static void print_branch_stats(void)
+{
+	printf("\n=== Branch Prediction Statistics ===\n");
+	printf("Total branches:    %lu\n", cpu.bp_total_branches);
+	printf("Mispredictions:    %lu\n", cpu.bp_mispredictions);
+	if (cpu.bp_total_branches > 0) {
+		double accuracy = 100.0 * (1.0 - (double)cpu.bp_mispredictions / (double)cpu.bp_total_branches);
+		printf("Prediction accuracy: %.2f%%\n", accuracy);
+	}
+	printf("Total cycles:      %lu\n", cpu.counter);
+	printf("====================================\n");
+}
+
 void fdb_start(void)
 {
 	if (need_debug)
@@ -127,6 +140,9 @@ void fdb_start(void)
 		else
 			cpu_exec_once();
 	}
+
+	// Print branch prediction statistics at end of simulation
+	print_branch_stats();
 
 	if (cpu.err)
 		perror_exit("Error happend in CPU.\n");

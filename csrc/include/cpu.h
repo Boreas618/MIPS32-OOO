@@ -22,6 +22,9 @@ typedef struct
 	uint64_t last_pc;
 	uint64_t last_inst;
 	uint64_t err;
+	// Branch prediction statistics
+	uint64_t bp_total_branches;
+	uint64_t bp_mispredictions;
 } CPU;
 
 extern CPU cpu;

@@ -5,6 +5,8 @@
  * Copyright (c) 2014-2022 Zihao Yu, Nanjing University
  */
 
+#ifdef HAS_LLVM
+
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
@@ -99,3 +101,22 @@ void disassemble(char *str, int size, uint64_t pc, uint8_t *code, int nbyte) {
 	assert((int)s.length() - skip < size);
 	strcpy(str, p);
 }
+
+#else /* !HAS_LLVM */
+
+#include <cstdint>
+#include <cstdio>
+
+void disasm_init(const char *triple) {
+	(void)triple;
+	// LLVM not available, disassembly disabled
+}
+
+void disassemble(char *str, int size, uint64_t pc, uint8_t *code, int nbyte) {
+	(void)pc;
+	(void)code;
+	(void)nbyte;
+	snprintf(str, size, "<disasm unavailable>");
+}
+
+#endif /* HAS_LLVM */

@@ -46,11 +46,14 @@ module Execute(
     logic [31:0]src1_e;
     logic [31:0]src2_e;
     logic [4:0]shamt_e;
+    logic [31:0]pc_plus_4e;  // For JAL return address
+    logic [31:0]alu_out_raw; // Raw ALU output before JAL override
 
     assign src1_e = alu_src_e[0] ? {27'b0, shamt_e} : rd1_e;
     assign src2_e = alu_src_e[1] ? imm_e : rd2_e;
     assign write_data_e = rd2_e;
-    assign write_reg_e = reg_dst_e ? rd_e : rt_e;
+    // For JAL (branch_type 0010), write to $ra (register 31)
+    assign write_reg_e = (branch_type_e == 4'b0010) ? 5'd31 : (reg_dst_e ? rd_e : rt_e);
 
     always_ff @(posedge clk) begin
         if (rst) begin
@@ -68,6 +71,7 @@ module Execute(
             imm_e <= 32'b0;
             shamt_e <= 5'b0;
             pc_branch_e <= 32'b0;
+            pc_plus_4e <= 32'b0;
             jump_addr_e <= 32'b0;
             branch_type_e <= 4'b0;
             mem_access_e <= 1'b0;
@@ -80,6 +84,7 @@ module Execute(
             alu_src_e <= alu_src_d;
             reg_dst_e <= reg_dst_d;
             pc_branch_e <= pc_plus_4d + (imm_d << 2);
+            pc_plus_4e <= pc_plus_4d;  // Save for JAL return address
             jump_addr_e <= jump_addr_d;
             branch_type_e <= branch_type_d;
             mem_access_e <= mem_access_d;
@@ -107,9 +112,13 @@ module Execute(
         .alu_ctrl(alu_control_e),
         .src1(src1_e),
         .src2(src2_e),
-        .out(alu_out_e)
+        .out(alu_out_raw)
     );
+    
+    // For JAL (branch_type 0010), output return address (PC+8)
+    // Otherwise use raw ALU output
+    assign alu_out_e = (branch_type_e == 4'b0010) ? (pc_plus_4e + 32'd4) : alu_out_raw;
 
-    assign zero_e = (alu_out_e == 32'b0) ? 1 : 0;
+    assign zero_e = (alu_out_raw == 32'b0) ? 1 : 0;
 
 endmodule

@@ -2,6 +2,7 @@
 /* verilator lint_off UNDRIVEN */
 
 `include "Icode.svh"
+`include "BranchTypes.svh"
 
 module Decode(
     input   logic   rst,
@@ -68,24 +69,27 @@ module Decode(
         if (branch_stall && branch_continue) begin
             branch_stall <= 1'b0;
         end else if (op == `BEQ || op == `BNE || op == `BGEZ || op == `J || op == `JAL || (op == `RTYPE && funct == `JR)) begin
-            if (op == `J) begin
-                branch_type_d <= 4'b0001;
-            end else if (op == `JAL) begin
-                branch_type_d <= 4'b0010;
-            end else if (op == `RTYPE && funct == `JR) begin
-                branch_type_d <= 4'b0011;
-            end else if (op == `BEQ) begin
-                branch_type_d <= 4'b0100;
-            end else if (op == `BNE) begin
-                branch_type_d <= 4'b0101;
-            end else if (op == `BGEZ && inst[20:16] == 5'b1) begin
-                branch_type_d <= 4'b0110;
-            end else if (op == `BGEZ && inst[20:16] != 5'b1) begin
-                branch_type_d <= 4'b0111;
-            end
             branch_stall <= 1'b1;
+        end
+        
+        if (op == `BEQ || op == `BNE || op == `BGEZ || op == `J || op == `JAL || (op == `RTYPE && funct == `JR)) begin
+            if (op == `J) begin
+                branch_type_d <= `BRANCH_TYPE_J;
+            end else if (op == `JAL) begin
+                branch_type_d <= `BRANCH_TYPE_JAL;
+            end else if (op == `RTYPE && funct == `JR) begin
+                branch_type_d <= `BRANCH_TYPE_JR;
+            end else if (op == `BEQ) begin
+                branch_type_d <= `BRANCH_TYPE_BEQ;
+            end else if (op == `BNE) begin
+                branch_type_d <= `BRANCH_TYPE_BNE;
+            end else if (op == `BGEZ && inst[20:16] == 5'b1) begin
+                branch_type_d <= `BRANCH_TYPE_BGEZ;
+            end else if (op == `BGEZ && inst[20:16] != 5'b1) begin
+                branch_type_d <= `BRANCH_TYPE_BLTZ;
+            end
         end else begin
-            branch_type_d <= 4'b0000;
+            branch_type_d <= `BRANCH_TYPE_NONE;
         end
 
         /*
@@ -388,6 +392,17 @@ module Decode(
                     alu_control_d <= 4'b0000;
                     alu_src_d <= 2'b00;
                     reg_dst_d <= 1'b0;
+                    mem_access_d <= 1'b0;
+                end
+                `JAL: begin
+                    // Jump and link: write PC+8 to $ra (reg 31)
+                    reg_write_d <= 1'b1;
+                    mem_to_reg_d <= 1'b0;
+                    mem_write_d <= 1'b0;
+                    branch_d <= 1'b1;
+                    alu_control_d <= 4'b1100;  // Pass through PC+8
+                    alu_src_d <= 2'b00;
+                    reg_dst_d <= 1'b0;  // Will need special handling for $31
                     mem_access_d <= 1'b0;
                 end
                 default: begin
