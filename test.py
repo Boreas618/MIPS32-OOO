@@ -45,7 +45,10 @@ if __name__ == "__main__":
         ("./tests/load_store/load_store.bin", 'LOAD_STORE'),
         ("./tests/branch/branch.bin", 'BRANCH'),
         ("./tests/lui/lui.bin", 'LUI'),
-        ("./tests/quick_sort/quick_sort.bin", 'QSORT')
+        ("./tests/quick_sort/quick_sort.bin", 'QSORT'),
+        ("./tests/ooo_deps/ooo_deps.bin", 'OOO_DEPS'),
+        ("./tests/ooo_mem/ooo_mem.bin", 'OOO_MEM'),
+        ("./tests/ooo_branch/ooo_branch.bin", 'OOO_BRANCH')
     ]
     good = True
     all_stats = []

@@ -111,11 +111,14 @@ module IssueUnit #(
         for (int i = 0; i < ISSUE_WIDTH; i++) begin
             // Memory operations (load or store)
             is_mem_op[i] = int_rs_valid[i] && (int_rs_mem_read[i] || int_rs_mem_write[i]);
-            
-            // Branch operations
-            is_branch_op[i] = int_rs_valid[i] && int_rs_branch[i] && !int_rs_mem_read[i] && !int_rs_mem_write[i];
-            
-            // ALU operations (everything else that's valid)
+
+            // Branch operations - but NOT JAL which needs to go to ALU to write PC+8 to $ra
+            // JAL has both branch=1 and reg_write=1; regular branches have branch=1 but reg_write=0
+            // J (unconditional jump without link) has branch=1 and reg_write=0, so it goes to BranchExecute
+            is_branch_op[i] = int_rs_valid[i] && int_rs_branch[i] && !int_rs_mem_read[i] &&
+                              !int_rs_mem_write[i] && !int_rs_reg_write[i];
+
+            // ALU operations (everything else that's valid, including JAL which has reg_write=1)
             is_alu_op[i] = int_rs_valid[i] && !is_mem_op[i] && !is_branch_op[i];
         end
     end

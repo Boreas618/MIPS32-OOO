@@ -20,7 +20,7 @@ module Top (
      * Configuration Parameters for OoO Frontend (Milestone 3)
      * Set OOO_ENABLED to 1 when backend (M4/M5) is implemented
      */
-    localparam OOO_ENABLED = 0;             // 0 = in-order, 1 = OoO frontend
+    localparam OOO_ENABLED = 1;             // 0 = in-order, 1 = OoO pipeline
     localparam FETCH_WIDTH = 4;             // Instructions per fetch
     localparam DECODE_WIDTH = 4;            // Instructions per decode
     localparam NUM_PHYS_REGS = 64;          // Physical registers
@@ -784,33 +784,90 @@ module Top (
         .renamed_count(ru_renamed_count)
     );
 
-    // OoO Frontend control signals (active when OOO_ENABLED=1)
-    // Currently tied off since backend (M4/M5) is not yet implemented
-    assign iq_enq_insts = '{default: 32'b0};
-    assign iq_enq_pcs = '{default: 32'b0};
-    assign iq_enq_valid = '0;
-    assign iq_enq_count = '0;
-    assign iq_enq_ready = 1'b0;
-    assign iq_enq_predicted_target = 32'b0;
-    assign iq_enq_predicted_taken = 1'b0;
-    assign iq_deq_ack = 1'b0;
-    assign iq_flush = 1'b0;
-    assign du_stall = 1'b0;
-    assign du_flush = 1'b0;
-    assign ru_stall = 1'b0;
-    assign ru_flush = 1'b0;
-    assign ru_flush_checkpoint = 3'b0;
-    assign ru_commit_valid = '0;
-    assign ru_commit_old_preg = '{default: 6'b0};
-    
-    // Physical register file control (tied off until OoO backend)
-    assign prf_read_addr = '{default: 6'b0};
-    assign prf_write_en = '0;
-    assign prf_write_addr = '{default: 6'b0};
-    assign prf_write_data = '{default: 32'b0};
-    assign prf_set_ready = '0;
-    assign prf_clear_ready_addr = '{default: 6'b0};
-    assign prf_clear_ready = '0;
+    // OoO Frontend and PRF control signals
+    generate if (OOO_ENABLED == 1) begin : ooo_control
+        // Instruction queue signals (currently unused, will be connected in full OoO)
+        assign iq_enq_insts = '{default: 32'b0};
+        assign iq_enq_pcs = '{default: 32'b0};
+        assign iq_enq_valid = '0;
+        assign iq_enq_count = '0;
+        assign iq_enq_ready = 1'b0;
+        assign iq_enq_predicted_target = 32'b0;
+        assign iq_enq_predicted_taken = 1'b0;
+        assign iq_deq_ack = 1'b0;
+        assign iq_flush = recov_iq_flush;
+        assign du_stall = 1'b0;
+        assign du_flush = recov_flush;
+
+        // Stall rename when backend is full
+        assign ru_stall = rs_full | rob_full_flag | lsq_full_flag;
+
+        // Commit interface to free old registers
+        assign ru_commit_valid = rob_commit_valid;
+        always_comb begin
+            for (int i = 0; i < DECODE_WIDTH; i++) begin
+                ru_commit_old_preg[i] = rob_commit_old_phys_rd[i];
+            end
+        end
+
+        // Recovery flush
+        assign ru_flush = recov_flush | recov_rat_restore;
+        assign ru_flush_checkpoint = recov_flush_checkpoint_id;
+
+        // PRF read addresses from RenameUnit source registers
+        always_comb begin
+            for (int i = 0; i < FETCH_WIDTH; i++) begin
+                prf_read_addr[i*2] = ru_ren_prs1[i];
+                prf_read_addr[i*2+1] = ru_ren_prs2[i];
+            end
+        end
+
+        // PRF write from CDB
+        always_comb begin
+            prf_write_en = '0;
+            prf_write_addr = '{default: 6'b0};
+            prf_write_data = '{default: 32'b0};
+            for (int i = 0; i < CDB_WIDTH; i++) begin
+                if (cdb_valid[i]) begin
+                    prf_write_en[i] = 1'b1;
+                    prf_write_addr[i] = cdb_tag[i];
+                    prf_write_data[i] = cdb_data[i];
+                end
+            end
+        end
+
+        // PRF ready tracking
+        assign prf_set_ready = cdb_valid;
+        assign prf_clear_ready_addr = ru_ren_prd;
+        assign prf_clear_ready = ru_ren_valid & ru_ren_reg_write;
+    end else begin : inorder_control
+        // Keep existing tie-offs for in-order mode
+        assign iq_enq_insts = '{default: 32'b0};
+        assign iq_enq_pcs = '{default: 32'b0};
+        assign iq_enq_valid = '0;
+        assign iq_enq_count = '0;
+        assign iq_enq_ready = 1'b0;
+        assign iq_enq_predicted_target = 32'b0;
+        assign iq_enq_predicted_taken = 1'b0;
+        assign iq_deq_ack = 1'b0;
+        assign iq_flush = 1'b0;
+        assign du_stall = 1'b0;
+        assign du_flush = 1'b0;
+        assign ru_stall = 1'b1;  // Always stalled in in-order mode
+        assign ru_flush = 1'b0;
+        assign ru_flush_checkpoint = 3'b0;
+        assign ru_commit_valid = '0;
+        assign ru_commit_old_preg = '{default: 6'b0};
+
+        // Physical register file control (tied off in in-order mode)
+        assign prf_read_addr = '{default: 6'b0};
+        assign prf_write_en = '0;
+        assign prf_write_addr = '{default: 6'b0};
+        assign prf_write_data = '{default: 32'b0};
+        assign prf_set_ready = '0;
+        assign prf_clear_ready_addr = '{default: 6'b0};
+        assign prf_clear_ready = '0;
+    end endgenerate
 
     /*
      * ========================================================================
@@ -1211,10 +1268,18 @@ module Top (
     logic [6:0] mem_result_rob_idx_tie [NUM_MEM-1:0];
     logic [NUM_MEM-1:0] mem_result_ack;
     
-    assign mem_result_valid_tie = '0;
-    assign mem_result_prd_tie = '{default: 6'b0};
-    assign mem_result_data_tie = '{default: 32'b0};
-    assign mem_result_rob_idx_tie = '{default: 7'b0};
+    // CDB memory result connections
+    generate if (OOO_ENABLED == 1) begin : ooo_cdb_mem
+        assign mem_result_valid_tie[0] = lsq_mem_result_valid;
+        assign mem_result_prd_tie[0] = lsq_mem_result_prd;
+        assign mem_result_data_tie[0] = lsq_mem_result_data;
+        assign mem_result_rob_idx_tie[0] = lsq_mem_result_rob_idx;
+    end else begin : inorder_cdb_mem
+        assign mem_result_valid_tie = '0;
+        assign mem_result_prd_tie = '{default: 6'b0};
+        assign mem_result_data_tie = '{default: 32'b0};
+        assign mem_result_rob_idx_tie = '{default: 7'b0};
+    end endgenerate
 
     // CDB acknowledgments
     logic [NUM_ALU-1:0] cdb_alu_ack;
@@ -1314,33 +1379,67 @@ module Top (
         .fwd_valid(bypass_fwd_valid)
     );
 
-    // M4 Backend control signals (active when OOO_ENABLED=1 and M5 ROB is implemented)
-    // Currently tied off since OOO backend is not yet fully integrated
-    assign rs_dispatch_valid = '0;
-    assign rs_dispatch_prs1 = '{default: 6'b0};
-    assign rs_dispatch_prs2 = '{default: 6'b0};
-    assign rs_dispatch_prd = '{default: 6'b0};
-    assign rs_dispatch_prs1_value = '{default: 32'b0};
-    assign rs_dispatch_prs2_value = '{default: 32'b0};
-    assign rs_dispatch_prs1_ready = '0;
-    assign rs_dispatch_prs2_ready = '0;
-    assign rs_dispatch_alu_control = '{default: 4'b0};
-    assign rs_dispatch_alu_src = '{default: 2'b0};
-    assign rs_dispatch_imm = '{default: 32'b0};
-    assign rs_dispatch_shamt = '{default: 5'b0};
-    assign rs_dispatch_reg_write = '0;
-    assign rs_dispatch_mem_to_reg = '0;
-    assign rs_dispatch_mem_write = '0;
-    assign rs_dispatch_mem_read = '0;
-    assign rs_dispatch_branch = '0;
-    assign rs_dispatch_pc = '{default: 32'b0};
-    assign rs_dispatch_pc_plus_4 = '{default: 32'b0};
-    assign rs_dispatch_branch_target = '{default: 32'b0};
-    assign rs_dispatch_jump_target = '{default: 32'b0};
-    assign rs_dispatch_branch_type = '{default: 4'b0};
-    assign rs_dispatch_predicted_target = '{default: 32'b0};
-    assign rs_dispatch_predicted_taken = '0;
-    assign rs_dispatch_rob_idx = '{default: 7'b0};
+    // M4 Backend control signals
+    generate if (OOO_ENABLED == 1) begin : ooo_rs_dispatch
+        assign rs_dispatch_valid = ru_ren_valid;
+        assign rs_dispatch_prs1 = ru_ren_prs1;
+        assign rs_dispatch_prs2 = ru_ren_prs2;
+        assign rs_dispatch_prd = ru_ren_prd;
+        assign rs_dispatch_prs1_ready = ru_ren_prs1_ready;
+        assign rs_dispatch_prs2_ready = ru_ren_prs2_ready;
+        assign rs_dispatch_alu_control = ru_ren_alu_control;
+        assign rs_dispatch_alu_src = ru_ren_alu_src;
+        assign rs_dispatch_imm = ru_ren_imm;
+        assign rs_dispatch_shamt = ru_ren_shamt;
+        assign rs_dispatch_reg_write = ru_ren_reg_write;
+        assign rs_dispatch_mem_to_reg = ru_ren_mem_to_reg;
+        assign rs_dispatch_mem_write = ru_ren_mem_write;
+        assign rs_dispatch_mem_read = ru_ren_mem_read;
+        assign rs_dispatch_branch = ru_ren_branch;
+        assign rs_dispatch_pc = ru_ren_pc;
+        assign rs_dispatch_pc_plus_4 = ru_ren_pc_plus_4;
+        assign rs_dispatch_branch_target = ru_ren_branch_target;
+        assign rs_dispatch_jump_target = ru_ren_jump_target;
+        assign rs_dispatch_branch_type = ru_ren_branch_type;
+        assign rs_dispatch_predicted_target = ru_ren_predicted_target;
+        assign rs_dispatch_predicted_taken = ru_ren_predicted_taken;
+        assign rs_dispatch_rob_idx = rob_alloc_idx;
+
+        // PRF read for operand values
+        always_comb begin
+            for (int i = 0; i < FETCH_WIDTH; i++) begin
+                rs_dispatch_prs1_value[i] = prf_read_data[i*2];
+                rs_dispatch_prs2_value[i] = prf_read_data[i*2+1];
+            end
+        end
+    end else begin : inorder_rs_dispatch
+        // Keep existing tie-offs for in-order mode
+        assign rs_dispatch_valid = '0;
+        assign rs_dispatch_prs1 = '{default: 6'b0};
+        assign rs_dispatch_prs2 = '{default: 6'b0};
+        assign rs_dispatch_prd = '{default: 6'b0};
+        assign rs_dispatch_prs1_value = '{default: 32'b0};
+        assign rs_dispatch_prs2_value = '{default: 32'b0};
+        assign rs_dispatch_prs1_ready = '0;
+        assign rs_dispatch_prs2_ready = '0;
+        assign rs_dispatch_alu_control = '{default: 4'b0};
+        assign rs_dispatch_alu_src = '{default: 2'b0};
+        assign rs_dispatch_imm = '{default: 32'b0};
+        assign rs_dispatch_shamt = '{default: 5'b0};
+        assign rs_dispatch_reg_write = '0;
+        assign rs_dispatch_mem_to_reg = '0;
+        assign rs_dispatch_mem_write = '0;
+        assign rs_dispatch_mem_read = '0;
+        assign rs_dispatch_branch = '0;
+        assign rs_dispatch_pc = '{default: 32'b0};
+        assign rs_dispatch_pc_plus_4 = '{default: 32'b0};
+        assign rs_dispatch_branch_target = '{default: 32'b0};
+        assign rs_dispatch_jump_target = '{default: 32'b0};
+        assign rs_dispatch_branch_type = '{default: 4'b0};
+        assign rs_dispatch_predicted_target = '{default: 32'b0};
+        assign rs_dispatch_predicted_taken = '0;
+        assign rs_dispatch_rob_idx = '{default: 7'b0};
+    end endgenerate
 
     /*
      * ========================================================================
@@ -1415,25 +1514,53 @@ module Top (
     logic [6:0] rob_head_out;
     logic [6:0] rob_tail_out;
 
-    // Tie off dispatch inputs (will be connected when OOO_ENABLED=1)
-    assign rob_dispatch_valid = '0;
-    assign rob_dispatch_arch_rd = '{default: 5'b0};
-    assign rob_dispatch_phys_rd = '{default: 6'b0};
-    assign rob_dispatch_old_phys_rd = '{default: 6'b0};
-    assign rob_dispatch_reg_write = '0;
-    assign rob_dispatch_mem_write = '0;
-    assign rob_dispatch_mem_read = '0;
-    assign rob_dispatch_branch = '0;
-    assign rob_dispatch_branch_type = '{default: 4'b0};
-    assign rob_dispatch_pc = '{default: 32'b0};
-    assign rob_dispatch_predicted_target = '{default: 32'b0};
-    assign rob_dispatch_predicted_taken = '0;
-    assign rob_dispatch_checkpoint_id = '{default: 3'b0};
-    assign rob_dispatch_checkpoint_valid = '0;
-    assign rob_load_complete_valid = 1'b0;
-    assign rob_load_complete_rob_idx = '0;
-    assign rob_store_addr_valid = 1'b0;
-    assign rob_store_addr_rob_idx = '0;
+    // ROB dispatch connections
+    generate if (OOO_ENABLED == 1) begin : ooo_rob_dispatch
+        assign rob_dispatch_valid = ru_ren_valid;
+        always_comb begin
+            for (int i = 0; i < FETCH_WIDTH; i++) begin
+                rob_dispatch_arch_rd[i] = du_dec_dest[i];
+                rob_dispatch_phys_rd[i] = ru_ren_prd[i];
+                rob_dispatch_old_phys_rd[i] = ru_ren_old_prd[i];
+                rob_dispatch_branch_type[i] = ru_ren_branch_type[i];
+                rob_dispatch_pc[i] = ru_ren_pc[i];
+                rob_dispatch_predicted_target[i] = ru_ren_predicted_target[i];
+                rob_dispatch_checkpoint_id[i] = ru_ren_checkpoint_id[i];
+            end
+        end
+        assign rob_dispatch_reg_write = ru_ren_reg_write;
+        assign rob_dispatch_mem_write = ru_ren_mem_write;
+        assign rob_dispatch_mem_read = ru_ren_mem_read;
+        assign rob_dispatch_branch = ru_ren_branch;
+        assign rob_dispatch_predicted_taken = ru_ren_predicted_taken;
+        assign rob_dispatch_checkpoint_valid = ru_ren_checkpoint_valid;
+
+        // LSQ integration
+        assign rob_load_complete_valid = lsq_rob_mem_complete_valid;
+        assign rob_load_complete_rob_idx = lsq_rob_mem_complete_rob_idx;
+        assign rob_store_addr_valid = lsq_rob_store_addr_valid;
+        assign rob_store_addr_rob_idx = lsq_rob_store_addr_rob_idx;
+    end else begin : inorder_rob_dispatch
+        // Keep existing tie-offs for in-order mode
+        assign rob_dispatch_valid = '0;
+        assign rob_dispatch_arch_rd = '{default: 5'b0};
+        assign rob_dispatch_phys_rd = '{default: 6'b0};
+        assign rob_dispatch_old_phys_rd = '{default: 6'b0};
+        assign rob_dispatch_reg_write = '0;
+        assign rob_dispatch_mem_write = '0;
+        assign rob_dispatch_mem_read = '0;
+        assign rob_dispatch_branch = '0;
+        assign rob_dispatch_branch_type = '{default: 4'b0};
+        assign rob_dispatch_pc = '{default: 32'b0};
+        assign rob_dispatch_predicted_target = '{default: 32'b0};
+        assign rob_dispatch_predicted_taken = '0;
+        assign rob_dispatch_checkpoint_id = '{default: 3'b0};
+        assign rob_dispatch_checkpoint_valid = '0;
+        assign rob_load_complete_valid = 1'b0;
+        assign rob_load_complete_rob_idx = '0;
+        assign rob_store_addr_valid = 1'b0;
+        assign rob_store_addr_rob_idx = '0;
+    end endgenerate
 
     ROB #(
         .ROB_ENTRIES(ROB_ENTRIES),
@@ -1612,23 +1739,51 @@ module Top (
     logic [$clog2(LQ_ENTRIES):0] lsq_lq_count;
     logic [$clog2(SQ_ENTRIES):0] lsq_sq_count;
 
-    // Tie off inputs (will be connected when OOO_ENABLED=1)
-    assign lsq_dispatch_valid = '0;
-    assign lsq_dispatch_is_load = '0;
-    assign lsq_dispatch_is_store = '0;
-    assign lsq_dispatch_prd = '{default: 6'b0};
-    assign lsq_dispatch_rob_idx = '{default: 7'b0};
-    assign lsq_dispatch_pc = '{default: 32'b0};
-    assign lsq_mem_issue_valid = 1'b0;
-    assign lsq_mem_issue_is_load = 1'b0;
-    assign lsq_mem_issue_is_store = 1'b0;
-    assign lsq_mem_issue_prd = '0;
-    assign lsq_mem_issue_addr = '0;
-    assign lsq_mem_issue_data = '0;
-    assign lsq_mem_issue_rob_idx = '0;
-    assign lsq_mem_result_ack = 1'b0;
-    assign lsq_flush = 1'b0;
-    assign lsq_flush_rob_idx = '0;
+    // LSQ dispatch connections
+    generate if (OOO_ENABLED == 1) begin : ooo_lsq_dispatch
+        assign lsq_dispatch_valid = ru_ren_valid;
+        assign lsq_dispatch_is_load = ru_ren_mem_read;
+        assign lsq_dispatch_is_store = ru_ren_mem_write;
+        always_comb begin
+            for (int i = 0; i < FETCH_WIDTH; i++) begin
+                lsq_dispatch_prd[i] = ru_ren_prd[i];
+                lsq_dispatch_rob_idx[i] = rob_alloc_idx[i];
+                lsq_dispatch_pc[i] = ru_ren_pc[i];
+            end
+        end
+
+        // Connect IssueUnit memory outputs
+        assign lsq_mem_issue_valid = iu_mem_valid[0];
+        assign lsq_mem_issue_is_load = iu_mem_read[0];
+        assign lsq_mem_issue_is_store = iu_mem_write[0];
+        assign lsq_mem_issue_prd = iu_mem_prd[0];
+        assign lsq_mem_issue_addr = iu_mem_addr[0];
+        assign lsq_mem_issue_data = iu_mem_data[0];
+        assign lsq_mem_issue_rob_idx = iu_mem_rob_idx[0];
+        assign lsq_mem_result_ack = mem_result_ack[0];
+
+        // Recovery flush from RecoveryUnit
+        assign lsq_flush = recov_lsq_flush;
+        assign lsq_flush_rob_idx = recov_lsq_flush_rob_idx;
+    end else begin : inorder_lsq_dispatch
+        // Keep existing tie-offs for in-order mode
+        assign lsq_dispatch_valid = '0;
+        assign lsq_dispatch_is_load = '0;
+        assign lsq_dispatch_is_store = '0;
+        assign lsq_dispatch_prd = '{default: 6'b0};
+        assign lsq_dispatch_rob_idx = '{default: 7'b0};
+        assign lsq_dispatch_pc = '{default: 32'b0};
+        assign lsq_mem_issue_valid = 1'b0;
+        assign lsq_mem_issue_is_load = 1'b0;
+        assign lsq_mem_issue_is_store = 1'b0;
+        assign lsq_mem_issue_prd = '0;
+        assign lsq_mem_issue_addr = '0;
+        assign lsq_mem_issue_data = '0;
+        assign lsq_mem_issue_rob_idx = '0;
+        assign lsq_mem_result_ack = 1'b0;
+        assign lsq_flush = 1'b0;
+        assign lsq_flush_rob_idx = '0;
+    end endgenerate
 
     MemoryDisambiguation #(
         .LQ_ENTRIES(LQ_ENTRIES),

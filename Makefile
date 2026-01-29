@@ -8,7 +8,7 @@ ROOT = $(abspath .)
 CSRCS = $(shell find $(ROOT)/csrc -name "*.c" -o -name "*.cpp" -o -name "*.cc")
 VSRCS = $(shell find $(ROOT)/vsrc -name "*.v" -o -name "*.sv")
 TOPNAME = Top
-VERILATOR_FLAGS = -Wall --cc --exe --build --trace -O2 -Ivsrc
+VERILATOR_FLAGS = -Wall -Wno-LATCH --cc --exe --build --trace -O2 -Ivsrc
 CFLAGS += -std=c++17 -I$(ROOT)/csrc -I$(ROOT)/csrc/include
 
 # Check if LLVM is available
