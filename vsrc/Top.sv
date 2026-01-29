@@ -1,4 +1,6 @@
+/* verilator lint_off UNUSEDPARAM */
 `include "Config.svh"
+`include "BranchTypes.svh"
 
 module Top (
     input	logic	rst,
@@ -13,6 +15,17 @@ module Top (
     output  logic   [31:0] bp_total_branches_out,
     output  logic   [31:0] bp_mispredictions_out
 );
+
+    /*
+     * Configuration Parameters for OoO Frontend (Milestone 3)
+     * Set OOO_ENABLED to 1 when backend (M4/M5) is implemented
+     */
+    localparam OOO_ENABLED = 0;             // 0 = in-order, 1 = OoO frontend
+    localparam FETCH_WIDTH = 4;             // Instructions per fetch
+    localparam DECODE_WIDTH = 4;            // Instructions per decode
+    localparam NUM_PHYS_REGS = 64;          // Physical registers
+    localparam QUEUE_DEPTH = 32;            // Instruction queue depth
+    localparam CHECKPOINT_COUNT = 8;        // RAT checkpoints
 
     /*
      * This block is for testing purposes. Test cases will return to `EXIT_ADDR`
@@ -454,5 +467,351 @@ module Top (
             system_counter <= system_counter + 32'd1;
         end
     end
+
+    /*
+     * ========================================================================
+     * Out-of-Order Frontend (Milestone 3)
+     * ========================================================================
+     * 
+     * The following modules implement the OoO frontend pipeline:
+     * - FreeList: Physical register management
+     * - PhysRegFile: Extended register file (64 physical registers)
+     * - InstructionQueue: Fetch buffer (32 entries)
+     * - DecodeUnit: Parallel decode (4-wide)
+     * - RenameUnit: Register renaming with RAT
+     *
+     * These components are instantiated and ready for integration with the
+     * OoO backend (Milestones 4 and 5). When OOO_ENABLED=1, these will be
+     * connected to the main pipeline.
+     */
+
+    /* verilator lint_off UNUSEDSIGNAL */
+
+    // ========== Free List - Physical Register Management ==========
+    logic [FETCH_WIDTH-1:0] fl_alloc_req;
+    logic [5:0] fl_alloc_preg [FETCH_WIDTH-1:0];
+    logic [FETCH_WIDTH-1:0] fl_alloc_valid;
+    logic [FETCH_WIDTH-1:0] fl_free_req;
+    logic [5:0] fl_free_preg [FETCH_WIDTH-1:0];
+    logic [6:0] fl_free_count;
+    logic fl_empty, fl_full;
+    logic fl_checkpoint_save, fl_checkpoint_restore;
+    logic [2:0] fl_checkpoint_slot, fl_next_checkpoint_slot;
+
+    FreeList #(
+        .NUM_PHYS_REGS(NUM_PHYS_REGS),
+        .NUM_ARCH_REGS(32),
+        .ALLOC_WIDTH(FETCH_WIDTH),
+        .FREE_WIDTH(FETCH_WIDTH),
+        .CHECKPOINT_COUNT(CHECKPOINT_COUNT)
+    ) ooo_free_list (
+        .clk(clk),
+        .rst(rst),
+        .alloc_req(fl_alloc_req),
+        .alloc_preg(fl_alloc_preg),
+        .alloc_valid(fl_alloc_valid),
+        .free_req(fl_free_req),
+        .free_preg(fl_free_preg),
+        .free_count(fl_free_count),
+        .empty(fl_empty),
+        .full(fl_full),
+        .checkpoint_save(fl_checkpoint_save),
+        .checkpoint_slot(fl_checkpoint_slot),
+        .checkpoint_restore(fl_checkpoint_restore),
+        .next_checkpoint_slot(fl_next_checkpoint_slot)
+    );
+
+    // ========== Physical Register File ==========
+    logic [5:0] prf_read_addr [7:0];
+    logic [31:0] prf_read_data [7:0];
+    logic [7:0] prf_read_ready;
+    logic [3:0] prf_write_en;
+    logic [5:0] prf_write_addr [3:0];
+    logic [31:0] prf_write_data [3:0];
+    logic [3:0] prf_set_ready;
+    logic [5:0] prf_clear_ready_addr [3:0];
+    logic [3:0] prf_clear_ready;
+    logic [31:0] prf_bypass_data [7:0];
+    logic [7:0] prf_bypass_valid;
+    logic [31:0] prf_arch_regs [31:0];
+    logic prf_magic;
+
+    PhysRegFile #(
+        .NUM_PHYS_REGS(NUM_PHYS_REGS),
+        .NUM_ARCH_REGS(32),
+        .READ_PORTS(8),
+        .WRITE_PORTS(4)
+    ) phys_reg_file (
+        .clk(clk),
+        .rst(rst),
+        .read_addr(prf_read_addr),
+        .read_data(prf_read_data),
+        .read_ready(prf_read_ready),
+        .write_en(prf_write_en),
+        .write_addr(prf_write_addr),
+        .write_data(prf_write_data),
+        .set_ready(prf_set_ready),
+        .clear_ready_addr(prf_clear_ready_addr),
+        .clear_ready(prf_clear_ready),
+        .bypass_data(prf_bypass_data),
+        .bypass_valid(prf_bypass_valid),
+        .arch_regs(prf_arch_regs),
+        .magic(prf_magic)
+    );
+
+    // ========== Instruction Queue ==========
+    logic [31:0] iq_enq_insts [FETCH_WIDTH-1:0];
+    logic [31:0] iq_enq_pcs [FETCH_WIDTH-1:0];
+    logic [FETCH_WIDTH-1:0] iq_enq_valid;
+    logic [2:0] iq_enq_count;
+    logic iq_enq_ready;
+    logic [31:0] iq_enq_predicted_target;
+    logic iq_enq_predicted_taken;
+    logic [31:0] iq_deq_insts [DECODE_WIDTH-1:0];
+    logic [31:0] iq_deq_pcs [DECODE_WIDTH-1:0];
+    logic [DECODE_WIDTH-1:0] iq_deq_valid;
+    logic [2:0] iq_deq_count;
+    logic iq_deq_ready;
+    logic iq_deq_ack;
+    logic [31:0] iq_deq_predicted_target [DECODE_WIDTH-1:0];
+    logic [DECODE_WIDTH-1:0] iq_deq_predicted_taken;
+    logic iq_flush;
+    logic [5:0] iq_queue_count;
+    logic iq_queue_empty, iq_queue_full;
+    logic [5:0] iq_free_slots;
+    logic iq_fetch_stall;
+
+    InstructionQueue #(
+        .QUEUE_DEPTH(QUEUE_DEPTH),
+        .ENQUEUE_WIDTH(FETCH_WIDTH),
+        .DEQUEUE_WIDTH(DECODE_WIDTH)
+    ) inst_queue (
+        .clk(clk),
+        .rst(rst),
+        .enq_insts(iq_enq_insts),
+        .enq_pcs(iq_enq_pcs),
+        .enq_valid(iq_enq_valid),
+        .enq_count(iq_enq_count),
+        .enq_ready(iq_enq_ready),
+        .enq_predicted_target(iq_enq_predicted_target),
+        .enq_predicted_taken(iq_enq_predicted_taken),
+        .deq_insts(iq_deq_insts),
+        .deq_pcs(iq_deq_pcs),
+        .deq_valid(iq_deq_valid),
+        .deq_count(iq_deq_count),
+        .deq_ready(iq_deq_ready),
+        .deq_ack(iq_deq_ack),
+        .deq_predicted_target(iq_deq_predicted_target),
+        .deq_predicted_taken(iq_deq_predicted_taken),
+        .flush(iq_flush),
+        .queue_count(iq_queue_count),
+        .queue_empty(iq_queue_empty),
+        .queue_full(iq_queue_full),
+        .free_slots(iq_free_slots),
+        .fetch_stall(iq_fetch_stall)
+    );
+
+    // ========== Decode Unit ==========
+    logic [DECODE_WIDTH-1:0] du_dec_valid;
+    logic [DECODE_WIDTH-1:0] du_dec_reg_write;
+    logic [DECODE_WIDTH-1:0] du_dec_mem_to_reg;
+    logic [DECODE_WIDTH-1:0] du_dec_mem_write;
+    logic [DECODE_WIDTH-1:0] du_dec_mem_read;
+    logic [DECODE_WIDTH-1:0] du_dec_branch;
+    logic [3:0] du_dec_alu_control [DECODE_WIDTH-1:0];
+    logic [1:0] du_dec_alu_src [DECODE_WIDTH-1:0];
+    logic [DECODE_WIDTH-1:0] du_dec_reg_dst;
+    logic [4:0] du_dec_rs [DECODE_WIDTH-1:0];
+    logic [4:0] du_dec_rt [DECODE_WIDTH-1:0];
+    logic [4:0] du_dec_rd [DECODE_WIDTH-1:0];
+    logic [4:0] du_dec_dest [DECODE_WIDTH-1:0];
+    logic [31:0] du_dec_imm [DECODE_WIDTH-1:0];
+    logic [4:0] du_dec_shamt [DECODE_WIDTH-1:0];
+    logic [31:0] du_dec_pc [DECODE_WIDTH-1:0];
+    logic [31:0] du_dec_pc_plus_4 [DECODE_WIDTH-1:0];
+    logic [31:0] du_dec_branch_target [DECODE_WIDTH-1:0];
+    logic [31:0] du_dec_jump_target [DECODE_WIDTH-1:0];
+    logic [3:0] du_dec_branch_type [DECODE_WIDTH-1:0];
+    logic [31:0] du_dec_predicted_target [DECODE_WIDTH-1:0];
+    logic [DECODE_WIDTH-1:0] du_dec_predicted_taken;
+    logic [DECODE_WIDTH-1:0][DECODE_WIDTH-1:0] du_dep_matrix;
+    logic du_decode_ack;
+    logic [2:0] du_decoded_count;
+    logic du_stall;
+    logic du_flush;
+
+    DecodeUnit #(
+        .DECODE_WIDTH(DECODE_WIDTH)
+    ) decode_unit (
+        .clk(clk),
+        .rst(rst),
+        .insts(iq_deq_insts),
+        .pcs(iq_deq_pcs),
+        .valid_in(iq_deq_valid),
+        .queue_ready(iq_deq_ready),
+        .predicted_target(iq_deq_predicted_target),
+        .predicted_taken(iq_deq_predicted_taken),
+        .stall(du_stall),
+        .flush(du_flush),
+        .dec_valid(du_dec_valid),
+        .dec_reg_write(du_dec_reg_write),
+        .dec_mem_to_reg(du_dec_mem_to_reg),
+        .dec_mem_write(du_dec_mem_write),
+        .dec_mem_read(du_dec_mem_read),
+        .dec_branch(du_dec_branch),
+        .dec_alu_control(du_dec_alu_control),
+        .dec_alu_src(du_dec_alu_src),
+        .dec_reg_dst(du_dec_reg_dst),
+        .dec_rs(du_dec_rs),
+        .dec_rt(du_dec_rt),
+        .dec_rd(du_dec_rd),
+        .dec_dest(du_dec_dest),
+        .dec_imm(du_dec_imm),
+        .dec_shamt(du_dec_shamt),
+        .dec_pc(du_dec_pc),
+        .dec_pc_plus_4(du_dec_pc_plus_4),
+        .dec_branch_target(du_dec_branch_target),
+        .dec_jump_target(du_dec_jump_target),
+        .dec_branch_type(du_dec_branch_type),
+        .dec_predicted_target(du_dec_predicted_target),
+        .dec_predicted_taken(du_dec_predicted_taken),
+        .dep_matrix(du_dep_matrix),
+        .decode_ack(du_decode_ack),
+        .decoded_count(du_decoded_count)
+    );
+
+    // ========== Rename Unit ==========
+    logic [DECODE_WIDTH-1:0] ru_ren_valid;
+    logic [5:0] ru_ren_prs1 [DECODE_WIDTH-1:0];
+    logic [5:0] ru_ren_prs2 [DECODE_WIDTH-1:0];
+    logic [5:0] ru_ren_prd [DECODE_WIDTH-1:0];
+    logic [5:0] ru_ren_old_prd [DECODE_WIDTH-1:0];
+    logic [DECODE_WIDTH-1:0] ru_ren_prs1_ready;
+    logic [DECODE_WIDTH-1:0] ru_ren_prs2_ready;
+    logic [DECODE_WIDTH-1:0] ru_ren_reg_write;
+    logic [DECODE_WIDTH-1:0] ru_ren_mem_to_reg;
+    logic [DECODE_WIDTH-1:0] ru_ren_mem_write;
+    logic [DECODE_WIDTH-1:0] ru_ren_mem_read;
+    logic [DECODE_WIDTH-1:0] ru_ren_branch;
+    logic [3:0] ru_ren_alu_control [DECODE_WIDTH-1:0];
+    logic [1:0] ru_ren_alu_src [DECODE_WIDTH-1:0];
+    logic [31:0] ru_ren_imm [DECODE_WIDTH-1:0];
+    logic [4:0] ru_ren_shamt [DECODE_WIDTH-1:0];
+    logic [31:0] ru_ren_pc [DECODE_WIDTH-1:0];
+    logic [31:0] ru_ren_pc_plus_4 [DECODE_WIDTH-1:0];
+    logic [31:0] ru_ren_branch_target [DECODE_WIDTH-1:0];
+    logic [31:0] ru_ren_jump_target [DECODE_WIDTH-1:0];
+    logic [3:0] ru_ren_branch_type [DECODE_WIDTH-1:0];
+    logic [31:0] ru_ren_predicted_target [DECODE_WIDTH-1:0];
+    logic [DECODE_WIDTH-1:0] ru_ren_predicted_taken;
+    logic [2:0] ru_ren_checkpoint_id [DECODE_WIDTH-1:0];
+    logic [DECODE_WIDTH-1:0] ru_ren_checkpoint_valid;
+    logic ru_rename_stall;
+    logic [2:0] ru_renamed_count;
+    logic ru_stall;
+    logic ru_flush;
+    logic [2:0] ru_flush_checkpoint;
+    logic [DECODE_WIDTH-1:0] ru_commit_valid;
+    logic [5:0] ru_commit_old_preg [DECODE_WIDTH-1:0];
+
+    RenameUnit #(
+        .RENAME_WIDTH(DECODE_WIDTH),
+        .NUM_ARCH_REGS(32),
+        .NUM_PHYS_REGS(NUM_PHYS_REGS),
+        .CHECKPOINT_COUNT(CHECKPOINT_COUNT)
+    ) rename_unit (
+        .clk(clk),
+        .rst(rst),
+        .dec_valid(du_dec_valid),
+        .dec_rs(du_dec_rs),
+        .dec_rt(du_dec_rt),
+        .dec_dest(du_dec_dest),
+        .dec_reg_write(du_dec_reg_write),
+        .dec_branch(du_dec_branch),
+        .dec_branch_type(du_dec_branch_type),
+        .dec_mem_to_reg(du_dec_mem_to_reg),
+        .dec_mem_write(du_dec_mem_write),
+        .dec_mem_read(du_dec_mem_read),
+        .dec_alu_control(du_dec_alu_control),
+        .dec_alu_src(du_dec_alu_src),
+        .dec_imm(du_dec_imm),
+        .dec_shamt(du_dec_shamt),
+        .dec_pc(du_dec_pc),
+        .dec_pc_plus_4(du_dec_pc_plus_4),
+        .dec_branch_target(du_dec_branch_target),
+        .dec_jump_target(du_dec_jump_target),
+        .dec_predicted_target(du_dec_predicted_target),
+        .dec_predicted_taken(du_dec_predicted_taken),
+        .stall(ru_stall),
+        .flush(ru_flush),
+        .flush_checkpoint(ru_flush_checkpoint),
+        .freelist_alloc_req(fl_alloc_req),
+        .freelist_alloc_preg(fl_alloc_preg),
+        .freelist_alloc_valid(fl_alloc_valid),
+        .freelist_checkpoint_save(fl_checkpoint_save),
+        .freelist_checkpoint_slot(fl_checkpoint_slot),
+        .freelist_checkpoint_restore(fl_checkpoint_restore),
+        .commit_valid(ru_commit_valid),
+        .commit_old_preg(ru_commit_old_preg),
+        .freelist_free_req(fl_free_req),
+        .freelist_free_preg(fl_free_preg),
+        .ren_valid(ru_ren_valid),
+        .ren_prs1(ru_ren_prs1),
+        .ren_prs2(ru_ren_prs2),
+        .ren_prd(ru_ren_prd),
+        .ren_old_prd(ru_ren_old_prd),
+        .ren_prs1_ready(ru_ren_prs1_ready),
+        .ren_prs2_ready(ru_ren_prs2_ready),
+        .ren_reg_write(ru_ren_reg_write),
+        .ren_mem_to_reg(ru_ren_mem_to_reg),
+        .ren_mem_write(ru_ren_mem_write),
+        .ren_mem_read(ru_ren_mem_read),
+        .ren_branch(ru_ren_branch),
+        .ren_alu_control(ru_ren_alu_control),
+        .ren_alu_src(ru_ren_alu_src),
+        .ren_imm(ru_ren_imm),
+        .ren_shamt(ru_ren_shamt),
+        .ren_pc(ru_ren_pc),
+        .ren_pc_plus_4(ru_ren_pc_plus_4),
+        .ren_branch_target(ru_ren_branch_target),
+        .ren_jump_target(ru_ren_jump_target),
+        .ren_branch_type(ru_ren_branch_type),
+        .ren_predicted_target(ru_ren_predicted_target),
+        .ren_predicted_taken(ru_ren_predicted_taken),
+        .ren_checkpoint_id(ru_ren_checkpoint_id),
+        .ren_checkpoint_valid(ru_ren_checkpoint_valid),
+        .rename_stall(ru_rename_stall),
+        .renamed_count(ru_renamed_count)
+    );
+
+    // OoO Frontend control signals (active when OOO_ENABLED=1)
+    // Currently tied off since backend (M4/M5) is not yet implemented
+    assign iq_enq_insts = '{default: 32'b0};
+    assign iq_enq_pcs = '{default: 32'b0};
+    assign iq_enq_valid = '0;
+    assign iq_enq_count = '0;
+    assign iq_enq_ready = 1'b0;
+    assign iq_enq_predicted_target = 32'b0;
+    assign iq_enq_predicted_taken = 1'b0;
+    assign iq_deq_ack = 1'b0;
+    assign iq_flush = 1'b0;
+    assign du_stall = 1'b0;
+    assign du_flush = 1'b0;
+    assign ru_stall = 1'b0;
+    assign ru_flush = 1'b0;
+    assign ru_flush_checkpoint = 3'b0;
+    assign ru_commit_valid = '0;
+    assign ru_commit_old_preg = '{default: 6'b0};
+    
+    // Physical register file control (tied off until OoO backend)
+    assign prf_read_addr = '{default: 6'b0};
+    assign prf_write_en = '0;
+    assign prf_write_addr = '{default: 6'b0};
+    assign prf_write_data = '{default: 32'b0};
+    assign prf_set_ready = '0;
+    assign prf_clear_ready_addr = '{default: 6'b0};
+    assign prf_clear_ready = '0;
+
+    /* verilator lint_on UNUSEDSIGNAL */
 
 endmodule
