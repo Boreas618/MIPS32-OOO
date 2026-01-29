@@ -1342,6 +1342,415 @@ module Top (
     assign rs_dispatch_predicted_taken = '0;
     assign rs_dispatch_rob_idx = '{default: 7'b0};
 
+    /*
+     * ========================================================================
+     * Out-of-Order Backend - Commit & Memory (Milestone 5)
+     * ========================================================================
+     * 
+     * The following modules implement the commit and memory subsystem:
+     * - ROB: Reorder buffer for in-order commit
+     * - CommitUnit: Commit logic coordinator
+     * - MemoryDisambiguation: Load/Store queue with forwarding
+     * - RecoveryUnit: Misprediction and exception recovery
+     *
+     * These components are instantiated and ready for integration.
+     * When OOO_ENABLED=1 and full integration is done, these will be
+     * connected to complete the OoO pipeline.
+     */
+
+    // ========== ROB Parameters ==========
+    localparam ROB_ENTRIES = 64;
+    localparam COMMIT_WIDTH = 4;
+
+    // ========== ROB Signals ==========
+    // Dispatch interface
+    logic [FETCH_WIDTH-1:0] rob_dispatch_valid;
+    logic [4:0] rob_dispatch_arch_rd [FETCH_WIDTH-1:0];
+    logic [5:0] rob_dispatch_phys_rd [FETCH_WIDTH-1:0];
+    logic [5:0] rob_dispatch_old_phys_rd [FETCH_WIDTH-1:0];
+    logic [FETCH_WIDTH-1:0] rob_dispatch_reg_write;
+    logic [FETCH_WIDTH-1:0] rob_dispatch_mem_write;
+    logic [FETCH_WIDTH-1:0] rob_dispatch_mem_read;
+    logic [FETCH_WIDTH-1:0] rob_dispatch_branch;
+    logic [3:0] rob_dispatch_branch_type [FETCH_WIDTH-1:0];
+    logic [31:0] rob_dispatch_pc [FETCH_WIDTH-1:0];
+    logic [31:0] rob_dispatch_predicted_target [FETCH_WIDTH-1:0];
+    logic [FETCH_WIDTH-1:0] rob_dispatch_predicted_taken;
+    logic [2:0] rob_dispatch_checkpoint_id [FETCH_WIDTH-1:0];
+    logic [FETCH_WIDTH-1:0] rob_dispatch_checkpoint_valid;
+    logic [6:0] rob_alloc_idx [FETCH_WIDTH-1:0];
+    logic [FETCH_WIDTH-1:0] rob_alloc_valid;
+    logic rob_full_flag;
+
+    // Commit interface
+    logic [COMMIT_WIDTH-1:0] rob_commit_valid;
+    logic [4:0] rob_commit_arch_rd [COMMIT_WIDTH-1:0];
+    logic [5:0] rob_commit_phys_rd [COMMIT_WIDTH-1:0];
+    logic [5:0] rob_commit_old_phys_rd [COMMIT_WIDTH-1:0];
+    logic [COMMIT_WIDTH-1:0] rob_commit_reg_write;
+    logic [COMMIT_WIDTH-1:0] rob_commit_store;
+    logic [COMMIT_WIDTH-1:0] rob_commit_load;
+    logic [6:0] rob_commit_rob_idx [COMMIT_WIDTH-1:0];
+    logic [31:0] rob_commit_pc [COMMIT_WIDTH-1:0];
+
+    // Flush interface
+    logic rob_flush_out;
+    logic [31:0] rob_flush_pc;
+    logic [6:0] rob_flush_rob_idx;
+    logic [2:0] rob_flush_checkpoint;
+
+    // Store commit signals
+    logic [COMMIT_WIDTH-1:0] rob_store_commit_valid;
+    logic [6:0] rob_store_commit_rob_idx [COMMIT_WIDTH-1:0];
+
+    // LSQ integration
+    logic rob_load_complete_valid;
+    logic [6:0] rob_load_complete_rob_idx;
+    logic rob_store_addr_valid;
+    logic [6:0] rob_store_addr_rob_idx;
+
+    // Status
+    logic [$clog2(ROB_ENTRIES):0] rob_count;
+    logic rob_empty;
+    logic [6:0] rob_head_out;
+    logic [6:0] rob_tail_out;
+
+    // Tie off dispatch inputs (will be connected when OOO_ENABLED=1)
+    assign rob_dispatch_valid = '0;
+    assign rob_dispatch_arch_rd = '{default: 5'b0};
+    assign rob_dispatch_phys_rd = '{default: 6'b0};
+    assign rob_dispatch_old_phys_rd = '{default: 6'b0};
+    assign rob_dispatch_reg_write = '0;
+    assign rob_dispatch_mem_write = '0;
+    assign rob_dispatch_mem_read = '0;
+    assign rob_dispatch_branch = '0;
+    assign rob_dispatch_branch_type = '{default: 4'b0};
+    assign rob_dispatch_pc = '{default: 32'b0};
+    assign rob_dispatch_predicted_target = '{default: 32'b0};
+    assign rob_dispatch_predicted_taken = '0;
+    assign rob_dispatch_checkpoint_id = '{default: 3'b0};
+    assign rob_dispatch_checkpoint_valid = '0;
+    assign rob_load_complete_valid = 1'b0;
+    assign rob_load_complete_rob_idx = '0;
+    assign rob_store_addr_valid = 1'b0;
+    assign rob_store_addr_rob_idx = '0;
+
+    ROB #(
+        .ROB_ENTRIES(ROB_ENTRIES),
+        .NUM_PHYS_REGS(NUM_PHYS_REGS),
+        .DISPATCH_WIDTH(FETCH_WIDTH),
+        .COMMIT_WIDTH(COMMIT_WIDTH),
+        .CDB_WIDTH(CDB_WIDTH)
+    ) reorder_buffer (
+        .clk(clk),
+        .rst(rst),
+        // Dispatch
+        .dispatch_valid(rob_dispatch_valid),
+        .dispatch_arch_rd(rob_dispatch_arch_rd),
+        .dispatch_phys_rd(rob_dispatch_phys_rd),
+        .dispatch_old_phys_rd(rob_dispatch_old_phys_rd),
+        .dispatch_reg_write(rob_dispatch_reg_write),
+        .dispatch_mem_write(rob_dispatch_mem_write),
+        .dispatch_mem_read(rob_dispatch_mem_read),
+        .dispatch_branch(rob_dispatch_branch),
+        .dispatch_branch_type(rob_dispatch_branch_type),
+        .dispatch_pc(rob_dispatch_pc),
+        .dispatch_predicted_target(rob_dispatch_predicted_target),
+        .dispatch_predicted_taken(rob_dispatch_predicted_taken),
+        .dispatch_checkpoint_id(rob_dispatch_checkpoint_id),
+        .dispatch_checkpoint_valid(rob_dispatch_checkpoint_valid),
+        .dispatch_rob_idx(rob_alloc_idx),
+        .dispatch_rob_valid(rob_alloc_valid),
+        .rob_full(rob_full_flag),
+        // CDB
+        .cdb_valid(cdb_valid),
+        .cdb_tag(cdb_tag),
+        .cdb_data(cdb_data),
+        .cdb_rob_idx(cdb_rob_idx),
+        .cdb_branch_complete(cdb_branch_complete[0]),
+        .cdb_branch_mispredicted(cdb_branch_mispredicted[0]),
+        .cdb_branch_correct_pc(cdb_branch_correct_pc[0]),
+        .cdb_branch_rob_idx(cdb_branch_rob_idx[0]),
+        // Commit
+        .commit_valid(rob_commit_valid),
+        .commit_arch_rd(rob_commit_arch_rd),
+        .commit_phys_rd(rob_commit_phys_rd),
+        .commit_old_phys_rd(rob_commit_old_phys_rd),
+        .commit_reg_write(rob_commit_reg_write),
+        .commit_store(rob_commit_store),
+        .commit_load(rob_commit_load),
+        .commit_rob_idx(rob_commit_rob_idx),
+        .commit_pc(rob_commit_pc),
+        // Flush
+        .flush(rob_flush_out),
+        .flush_pc(rob_flush_pc),
+        .flush_rob_idx(rob_flush_rob_idx),
+        .flush_checkpoint_id(rob_flush_checkpoint),
+        // Store commit
+        .store_commit_valid(rob_store_commit_valid),
+        .store_commit_rob_idx(rob_store_commit_rob_idx),
+        // LSQ integration
+        .load_complete_valid(rob_load_complete_valid),
+        .load_complete_rob_idx(rob_load_complete_rob_idx),
+        .store_addr_valid(rob_store_addr_valid),
+        .store_addr_rob_idx(rob_store_addr_rob_idx),
+        // Status
+        .rob_count(rob_count),
+        .rob_empty(rob_empty),
+        .rob_head(rob_head_out),
+        .rob_tail(rob_tail_out)
+    );
+
+    // ========== Commit Unit ==========
+    logic [COMMIT_WIDTH-1:0] cu_commit_valid;
+    logic [4:0] cu_commit_arch_rd [COMMIT_WIDTH-1:0];
+    logic [5:0] cu_commit_phys_rd [COMMIT_WIDTH-1:0];
+    logic [COMMIT_WIDTH-1:0] cu_commit_reg_write;
+    logic [COMMIT_WIDTH-1:0] cu_free_req;
+    logic [5:0] cu_free_preg [COMMIT_WIDTH-1:0];
+    logic [COMMIT_WIDTH-1:0] cu_store_commit;
+    logic [6:0] cu_store_commit_rob_idx [COMMIT_WIDTH-1:0];
+    logic cu_flush_pipeline;
+    logic [31:0] cu_flush_target_pc;
+    logic [2:0] cu_flush_checkpoint;
+    logic [31:0] cu_committed_insts;
+    logic [31:0] cu_committed_stores;
+    logic [31:0] cu_committed_loads;
+
+    CommitUnit #(
+        .COMMIT_WIDTH(COMMIT_WIDTH),
+        .NUM_PHYS_REGS(NUM_PHYS_REGS),
+        .ROB_ENTRIES(ROB_ENTRIES)
+    ) commit_unit (
+        .clk(clk),
+        .rst(rst),
+        // ROB interface
+        .rob_commit_valid(rob_commit_valid),
+        .rob_commit_arch_rd(rob_commit_arch_rd),
+        .rob_commit_phys_rd(rob_commit_phys_rd),
+        .rob_commit_old_phys_rd(rob_commit_old_phys_rd),
+        .rob_commit_reg_write(rob_commit_reg_write),
+        .rob_commit_store(rob_commit_store),
+        .rob_commit_load(rob_commit_load),
+        .rob_commit_rob_idx(rob_commit_rob_idx),
+        .rob_commit_pc(rob_commit_pc),
+        .rob_flush(rob_flush_out),
+        .rob_flush_pc(rob_flush_pc),
+        .rob_flush_rob_idx(rob_flush_rob_idx),
+        .rob_flush_checkpoint_id(rob_flush_checkpoint),
+        // RenameUnit interface
+        .commit_valid(cu_commit_valid),
+        .commit_arch_rd(cu_commit_arch_rd),
+        .commit_phys_rd(cu_commit_phys_rd),
+        .commit_reg_write(cu_commit_reg_write),
+        // FreeList interface
+        .free_req(cu_free_req),
+        .free_preg(cu_free_preg),
+        // Store Queue interface
+        .store_commit(cu_store_commit),
+        .store_commit_rob_idx(cu_store_commit_rob_idx),
+        // Recovery interface
+        .flush_pipeline(cu_flush_pipeline),
+        .flush_target_pc(cu_flush_target_pc),
+        .flush_checkpoint(cu_flush_checkpoint),
+        // Performance counters
+        .committed_insts(cu_committed_insts),
+        .committed_stores(cu_committed_stores),
+        .committed_loads(cu_committed_loads)
+    );
+
+    // ========== Memory Disambiguation Unit (integrates LoadQueue + StoreQueue) ==========
+    localparam LQ_ENTRIES = 32;
+    localparam SQ_ENTRIES = 32;
+
+    // Dispatch interface
+    logic [FETCH_WIDTH-1:0] lsq_dispatch_valid;
+    logic [FETCH_WIDTH-1:0] lsq_dispatch_is_load;
+    logic [FETCH_WIDTH-1:0] lsq_dispatch_is_store;
+    logic [5:0] lsq_dispatch_prd [FETCH_WIDTH-1:0];
+    logic [6:0] lsq_dispatch_rob_idx [FETCH_WIDTH-1:0];
+    logic [31:0] lsq_dispatch_pc [FETCH_WIDTH-1:0];     // PC for memory violation recovery
+    logic [FETCH_WIDTH-1:0] lsq_dispatch_lsq_valid;
+    logic lsq_full_flag;
+
+    // Issue interface
+    logic lsq_mem_issue_valid;
+    logic lsq_mem_issue_is_load;
+    logic lsq_mem_issue_is_store;
+    logic [5:0] lsq_mem_issue_prd;
+    logic [31:0] lsq_mem_issue_addr;
+    logic [31:0] lsq_mem_issue_data;
+    logic [6:0] lsq_mem_issue_rob_idx;
+
+    // Cache interface
+    logic lsq_cache_req_valid;
+    logic lsq_cache_req_write;
+    logic [31:0] lsq_cache_req_addr;
+    logic [31:0] lsq_cache_req_data;
+
+    // Result interface
+    logic lsq_mem_result_valid;
+    logic [5:0] lsq_mem_result_prd;
+    logic [31:0] lsq_mem_result_data;
+    logic [6:0] lsq_mem_result_rob_idx;
+    logic lsq_mem_result_ack;
+
+    // ROB interface
+    logic lsq_rob_mem_complete_valid;
+    logic [6:0] lsq_rob_mem_complete_rob_idx;
+    logic lsq_rob_store_addr_valid;
+    logic [6:0] lsq_rob_store_addr_rob_idx;
+
+    // Recovery interface
+    logic lsq_memory_violation;
+    logic [6:0] lsq_violation_rob_idx;
+    logic [31:0] lsq_violation_pc;          // PC of violating load for re-execution
+    logic lsq_flush;
+    logic [6:0] lsq_flush_rob_idx;
+
+    // Status
+    logic [$clog2(LQ_ENTRIES):0] lsq_lq_count;
+    logic [$clog2(SQ_ENTRIES):0] lsq_sq_count;
+
+    // Tie off inputs (will be connected when OOO_ENABLED=1)
+    assign lsq_dispatch_valid = '0;
+    assign lsq_dispatch_is_load = '0;
+    assign lsq_dispatch_is_store = '0;
+    assign lsq_dispatch_prd = '{default: 6'b0};
+    assign lsq_dispatch_rob_idx = '{default: 7'b0};
+    assign lsq_dispatch_pc = '{default: 32'b0};
+    assign lsq_mem_issue_valid = 1'b0;
+    assign lsq_mem_issue_is_load = 1'b0;
+    assign lsq_mem_issue_is_store = 1'b0;
+    assign lsq_mem_issue_prd = '0;
+    assign lsq_mem_issue_addr = '0;
+    assign lsq_mem_issue_data = '0;
+    assign lsq_mem_issue_rob_idx = '0;
+    assign lsq_mem_result_ack = 1'b0;
+    assign lsq_flush = 1'b0;
+    assign lsq_flush_rob_idx = '0;
+
+    MemoryDisambiguation #(
+        .LQ_ENTRIES(LQ_ENTRIES),
+        .SQ_ENTRIES(SQ_ENTRIES),
+        .NUM_PHYS_REGS(NUM_PHYS_REGS),
+        .DISPATCH_WIDTH(FETCH_WIDTH),
+        .COMMIT_WIDTH(COMMIT_WIDTH)
+    ) mem_disambig (
+        .clk(clk),
+        .rst(rst),
+        // Dispatch
+        .dispatch_valid(lsq_dispatch_valid),
+        .dispatch_is_load(lsq_dispatch_is_load),
+        .dispatch_is_store(lsq_dispatch_is_store),
+        .dispatch_prd(lsq_dispatch_prd),
+        .dispatch_rob_idx(lsq_dispatch_rob_idx),
+        .dispatch_pc(lsq_dispatch_pc),
+        .dispatch_lsq_valid(lsq_dispatch_lsq_valid),
+        .lsq_full(lsq_full_flag),
+        // Issue
+        .mem_issue_valid(lsq_mem_issue_valid),
+        .mem_issue_is_load(lsq_mem_issue_is_load),
+        .mem_issue_is_store(lsq_mem_issue_is_store),
+        .mem_issue_prd(lsq_mem_issue_prd),
+        .mem_issue_addr(lsq_mem_issue_addr),
+        .mem_issue_data(lsq_mem_issue_data),
+        .mem_issue_rob_idx(lsq_mem_issue_rob_idx),
+        // Cache interface (directly to L1DCache would go here)
+        .cache_req_valid(lsq_cache_req_valid),
+        .cache_req_write(lsq_cache_req_write),
+        .cache_req_addr(lsq_cache_req_addr),
+        .cache_req_data(lsq_cache_req_data),
+        .cache_status(2'b00),  // Tied off for now
+        .cache_read_data(32'b0),
+        // Result
+        .mem_result_valid(lsq_mem_result_valid),
+        .mem_result_prd(lsq_mem_result_prd),
+        .mem_result_data(lsq_mem_result_data),
+        .mem_result_rob_idx(lsq_mem_result_rob_idx),
+        .mem_result_ack(lsq_mem_result_ack),
+        // Commit
+        .commit_valid(rob_commit_valid),
+        .commit_is_store(rob_commit_store),
+        .commit_rob_idx(rob_commit_rob_idx),
+        // ROB interface
+        .rob_mem_complete_valid(lsq_rob_mem_complete_valid),
+        .rob_mem_complete_rob_idx(lsq_rob_mem_complete_rob_idx),
+        .rob_store_addr_valid(lsq_rob_store_addr_valid),
+        .rob_store_addr_rob_idx(lsq_rob_store_addr_rob_idx),
+        // Recovery
+        .memory_violation(lsq_memory_violation),
+        .violation_rob_idx(lsq_violation_rob_idx),
+        .violation_pc(lsq_violation_pc),
+        .flush(lsq_flush),
+        .flush_rob_idx(lsq_flush_rob_idx),
+        // ROB head for age comparison (handles wraparound)
+        .rob_head_idx(rob_head_out),
+        // Status
+        .lq_count(lsq_lq_count),
+        .sq_count(lsq_sq_count)
+    );
+
+    // ========== Recovery Unit ==========
+    logic recov_flush;
+    logic [31:0] recov_flush_pc;
+    logic [6:0] recov_flush_rob_idx_out;
+    logic [2:0] recov_flush_checkpoint_id;
+    logic recov_redirect_valid;
+    logic [31:0] recov_redirect_pc;
+    logic recov_rat_restore;
+    logic [2:0] recov_rat_restore_checkpoint;
+    logic recov_freelist_restore;
+    logic [2:0] recov_freelist_restore_checkpoint;
+    logic recov_rs_flush;
+    logic [6:0] recov_rs_flush_rob_idx;
+    logic recov_lsq_flush;
+    logic [6:0] recov_lsq_flush_rob_idx;
+    logic recov_iq_flush;
+    logic recov_recovery_in_progress;
+    logic [1:0] recov_recovery_type;
+
+    RecoveryUnit #(
+        .NUM_PHYS_REGS(NUM_PHYS_REGS),
+        .ROB_ENTRIES(ROB_ENTRIES),
+        .CHECKPOINT_COUNT(CHECKPOINT_COUNT)
+    ) recovery_unit (
+        .clk(clk),
+        .rst(rst),
+        // ROB recovery
+        .rob_flush(rob_flush_out),
+        .rob_flush_pc(rob_flush_pc),
+        .rob_flush_rob_idx(rob_flush_rob_idx),
+        .rob_flush_checkpoint_id(rob_flush_checkpoint),
+        // Memory violation
+        .mem_violation(lsq_memory_violation),
+        .mem_violation_rob_idx(lsq_violation_rob_idx),
+        .mem_violation_pc(lsq_violation_pc),
+        // Branch (unused, handled by ROB)
+        .branch_mispredicted(1'b0),
+        .branch_correct_pc(32'b0),
+        .branch_rob_idx(7'b0),
+        .branch_checkpoint_id(3'b0),
+        // Outputs
+        .flush(recov_flush),
+        .flush_pc(recov_flush_pc),
+        .flush_rob_idx(recov_flush_rob_idx_out),
+        .flush_checkpoint_id(recov_flush_checkpoint_id),
+        .redirect_valid(recov_redirect_valid),
+        .redirect_pc(recov_redirect_pc),
+        .rat_restore(recov_rat_restore),
+        .rat_restore_checkpoint(recov_rat_restore_checkpoint),
+        .freelist_restore(recov_freelist_restore),
+        .freelist_restore_checkpoint(recov_freelist_restore_checkpoint),
+        .rs_flush(recov_rs_flush),
+        .rs_flush_rob_idx(recov_rs_flush_rob_idx),
+        .lsq_flush(recov_lsq_flush),
+        .lsq_flush_rob_idx(recov_lsq_flush_rob_idx),
+        .iq_flush(recov_iq_flush),
+        .recovery_in_progress(recov_recovery_in_progress),
+        .recovery_type(recov_recovery_type)
+    );
+
     /* verilator lint_on UNUSEDSIGNAL */
 
 endmodule
